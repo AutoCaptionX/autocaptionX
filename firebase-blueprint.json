@@ -1,0 +1,23 @@
+{
+  "entities": {
+    "UserProfile": {
+      "collection": "users",
+      "fields": {
+        "email": { "type": "string", "required": false },
+        "displayName": { "type": "string", "required": false },
+        "photoURL": { "type": "string", "required": false },
+        "createdAt": { "type": "string", "required": true }
+      }
+    },
+    "CaptionJob": {
+      "collection": "users/{userId}/captionJobs",
+      "fields": {
+        "fileName": { "type": "string", "required": true },
+        "status": { "type": "string", "required": true },
+        "resolution": { "type": "string", "required": false },
+        "captionCount": { "type": "number", "required": false },
+        "createdAt": { "type": "string", "required": true }
+      }
+    }
+  }
+}

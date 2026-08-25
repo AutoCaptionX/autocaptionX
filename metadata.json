@@ -1,0 +1,6 @@
+{
+  "name": "AutoCaptionX",
+  "description": "AI Video Captioning & Subtitle Generator with Firebase Authentication and AssemblyAI integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

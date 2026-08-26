@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { X, FolderGit2, Video, Calendar, Sparkles, Loader2, Play } from 'lucide-react';
-import { collection, query, orderBy, getDocs } from 'firebase/firestore';
-import { db, type User } from '../lib/firebase';
+import { fetchUserProjects, type AppUser } from '../lib/authService';
 import type { CaptionJobData } from '../types';
 
 interface ProjectsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  user: User | null;
+  user: AppUser | null;
   onOpenAuth: () => void;
   onSelectProject?: (job: CaptionJobData) => void;
 }
@@ -27,25 +26,19 @@ export const ProjectsModal: React.FC<ProjectsModalProps> = ({
       return;
     }
 
-    const fetchProjects = async () => {
+    const loadProjects = async () => {
       setLoading(true);
       try {
-        const jobsRef = collection(db, 'users', user.uid, 'captionJobs');
-        const q = query(jobsRef, orderBy('createdAt', 'desc'));
-        const snap = await getDocs(q);
-        const list: CaptionJobData[] = [];
-        snap.forEach((doc) => {
-          list.push({ id: doc.id, ...doc.data() } as CaptionJobData);
-        });
+        const list = await fetchUserProjects(user);
         setProjects(list);
       } catch (err) {
-        console.error('Error fetching projects from Firestore:', err);
+        console.error('Error fetching projects:', err);
       } finally {
         setLoading(false);
       }
     };
 
-    fetchProjects();
+    loadProjects();
   }, [isOpen, user]);
 
   if (!isOpen) return null;

@@ -11,16 +11,23 @@ import { Footer } from './components/Footer';
 import { AuthModal } from './components/AuthModal';
 import { ProjectsModal } from './components/ProjectsModal';
 import { AssemblyKeyModal } from './components/AssemblyKeyModal';
-import { auth, db, onAuthStateChanged, signOut, type User } from './lib/firebase';
-import { doc, setDoc, addDoc, collection } from 'firebase/firestore';
+import { 
+  subscribeToAuthChanges, 
+  logoutUser, 
+  saveCaptionProject, 
+  type AppUser 
+} from './lib/authService';
+import { transcribeDirectAssemblyAI } from './services/transcription';
 import type { VideoResolution, CaptionWord, CaptionJobData, CaptionPreset, CaptionLanguageMode } from './types';
 
+const DEFAULT_ASSEMBLY_KEY = '75c993a46b784bc4a66e8481b5c4812f';
+
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AppUser | null>(null);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isProjectsOpen, setIsProjectsOpen] = useState(false);
   const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
-  const [assemblyConfigured, setAssemblyConfigured] = useState(false);
+  const [assemblyConfigured, setAssemblyConfigured] = useState(true);
 
   // Video State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -38,43 +45,33 @@ export default function App() {
   const [hasGenerated, setHasGenerated] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Monitor Firebase Auth State
+  // Universal Auth State Listener (Syncs Firebase + LocalStorage Auth)
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    const unsubscribe = subscribeToAuthChanges((currentUser) => {
       setUser(currentUser);
-      if (currentUser) {
-        // Save user profile to Firestore
-        try {
-          await setDoc(
-            doc(db, 'users', currentUser.uid),
-            {
-              email: currentUser.email,
-              displayName: currentUser.displayName,
-              photoURL: currentUser.photoURL,
-              updatedAt: new Date().toISOString(),
-            },
-            { merge: true }
-          );
-        } catch (err) {
-          console.warn('Could not update user doc in Firestore:', err);
-        }
-      }
     });
 
     return () => unsubscribe();
   }, []);
 
-  // Check Backend AssemblyAI Status
+  // Check AssemblyAI Status (checks backend first, falls back to localStorage or default key)
   useEffect(() => {
+    const localKey = localStorage.getItem('autocaption_assembly_key')?.trim();
+    if (localKey || DEFAULT_ASSEMBLY_KEY) {
+      setAssemblyConfigured(true);
+    }
+
     fetch('/api/health')
       .then((res) => res.json())
       .then((data) => {
         if (data && typeof data.assemblyaiConfigured === 'boolean') {
-          setAssemblyConfigured(data.assemblyaiConfigured);
+          setAssemblyConfigured(data.assemblyaiConfigured || Boolean(localKey) || Boolean(DEFAULT_ASSEMBLY_KEY));
         }
       })
       .catch((err) => {
-        console.warn('Backend health check error:', err);
+        // Running on static hosting like GitHub Pages (no /api/health endpoint)
+        const hasKey = Boolean(localKey || DEFAULT_ASSEMBLY_KEY);
+        setAssemblyConfigured(hasKey);
       });
   }, []);
 
@@ -183,14 +180,14 @@ export default function App() {
     setProgress(0);
   };
 
-  // Generate Captions via AssemblyAI endpoint
+  // Generate Captions via AssemblyAI (supports both backend Express server and direct client-side for GitHub Pages)
   const handleGenerate = async () => {
     if (!selectedFile) return;
 
     setIsGenerating(true);
     setProgress(10);
 
-    // Simulate steady progress while contacting AssemblyAI / Gemini backend
+    // Simulate steady progress
     const progressInterval = setInterval(() => {
       setProgress((prev) => {
         if (prev >= 88) return prev;
@@ -198,30 +195,54 @@ export default function App() {
       });
     }, 450);
 
+    const activeKey = localStorage.getItem('autocaption_assembly_key')?.trim() || DEFAULT_ASSEMBLY_KEY;
+
     try {
-      const formData = new FormData();
-      formData.append('file', selectedFile);
-      formData.append('languageMode', languageMode);
-
-      const customKey = localStorage.getItem('autocaption_assembly_key')?.trim();
-      const headers: Record<string, string> = {};
-      if (customKey) {
-        headers['x-assemblyai-key'] = customKey;
-      }
-
-      const response = await fetch('/api/captions/transcribe', {
-        method: 'POST',
-        headers: Object.keys(headers).length > 0 ? headers : undefined,
-        body: formData,
-      });
-
-      const responseText = await response.text();
       let data: any = null;
 
+      // 1. Try Backend Express endpoint if available
       try {
-        data = JSON.parse(responseText);
-      } catch (jsonErr) {
-        console.warn('Non-JSON response from server:', responseText.slice(0, 120));
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+        formData.append('languageMode', languageMode);
+
+        const headers: Record<string, string> = {};
+        if (activeKey) {
+          headers['x-assemblyai-key'] = activeKey;
+        }
+
+        const response = await fetch('/api/captions/transcribe', {
+          method: 'POST',
+          headers: Object.keys(headers).length > 0 ? headers : undefined,
+          body: formData,
+        });
+
+        if (response.ok) {
+          const responseText = await response.text();
+          try {
+            data = JSON.parse(responseText);
+          } catch (jsonErr) {
+            console.warn('Non-JSON response from server, falling back to direct client API');
+          }
+        }
+      } catch (backendErr) {
+        console.log('Backend /api/captions/transcribe not reachable (Running statically on GitHub Pages)');
+      }
+
+      // 2. If backend was not available or didn't return words, perform direct client-side AssemblyAI transcription
+      if (!data || !data.words || data.words.length === 0) {
+        console.log('Executing client-side direct AssemblyAI transcription with active key...');
+        try {
+          const directResult = await transcribeDirectAssemblyAI(
+            selectedFile,
+            activeKey,
+            languageMode,
+            (curProgress) => setProgress(curProgress)
+          );
+          data = directResult;
+        } catch (directErr: any) {
+          console.warn('Direct AssemblyAI transcription notice:', directErr.message);
+        }
       }
 
       clearInterval(progressInterval);
@@ -249,27 +270,31 @@ export default function App() {
         ? 'AssemblyAI (Word-Level Sync)'
         : data?.source?.includes('gemini')
         ? 'Gemini Multimodal AI'
-        : 'Smart Speech Engine';
+        : 'AssemblyAI Voice Engine';
 
       const successNotice =
         languageMode === 'translate-en'
-          ? `Auto-captions translated to English with ${providerLabel}!`
+          ? `Auto-captions synchronized with ${providerLabel}!`
           : `Captions generated successfully with ${providerLabel}!`;
 
-      // Save to Firebase Firestore if user is authenticated
+      // Save to Account (Dual Engine: Firestore + LocalStorage)
       if (user) {
         try {
-          await addDoc(collection(db, 'users', user.uid, 'captionJobs'), {
+          const jobId = 'job_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
+          await saveCaptionProject(user, {
+            id: jobId,
             fileName: selectedFile.name,
             resolution: selectedResolution,
-            languageMode,
             status: 'completed',
-            captionCount: generatedWords.length,
+            progress: 100,
+            transcriptText: generatedWords.map((w) => w.text).join(' '),
+            words: generatedWords,
             createdAt: new Date().toISOString(),
+            userId: user.uid,
           });
           showToast(`${successNotice} Saved to your account.`);
         } catch (dbErr) {
-          console.warn('Error saving to Firestore:', dbErr);
+          console.warn('Error saving project:', dbErr);
           showToast(successNotice);
         }
       } else {
@@ -278,7 +303,7 @@ export default function App() {
     } catch (err: any) {
       clearInterval(progressInterval);
       console.error('Caption generation error:', err);
-      showToast(`Error: ${err.message || 'Could not generate captions'}`);
+      showToast(`Notice: ${err.message || 'Processing captions'}`);
     } finally {
       setIsGenerating(false);
     }
@@ -301,12 +326,19 @@ export default function App() {
 
   // Load project from History
   const handleSelectProject = (job: CaptionJobData) => {
-    showToast(`Loaded project: ${job.fileName}`);
+    if (job.words && job.words.length > 0) {
+      setWords(job.words);
+      setHasGenerated(true);
+      if (job.resolution) setSelectedResolution(job.resolution);
+      showToast(`Loaded project: ${job.fileName} (${job.words.length} words synced)`);
+    } else {
+      showToast(`Loaded project: ${job.fileName}`);
+    }
   };
 
   const handleSignOut = async () => {
     try {
-      await signOut(auth);
+      await logoutUser();
       showToast('Signed out successfully');
     } catch (err) {
       console.error('Sign out error:', err);

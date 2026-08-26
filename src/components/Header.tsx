@@ -1,9 +1,9 @@
 import React from 'react';
 import { Sparkles, FolderGit2, LogIn, LogOut, Key, CheckCircle2, AlertCircle, Download } from 'lucide-react';
-import type { User } from '../lib/firebase';
+import type { AppUser } from '../lib/authService';
 
 interface HeaderProps {
-  user: User | null;
+  user: AppUser | null;
   onOpenAuth: () => void;
   onSignOut: () => void;
   onOpenProjects: () => void;

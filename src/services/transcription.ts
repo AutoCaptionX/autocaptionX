@@ -298,7 +298,7 @@ export function polishCaptionWords(words: CaptionWord[]): CaptionWord[] {
   return cleaned;
 }
 
-// Client-Side Cloud Translation
+// Client-Side Cloud Translation with timeout safety
 async function translateTextToEnglish(text: string): Promise<string> {
   const clean = text.trim();
   if (!clean) return '';
@@ -307,7 +307,7 @@ async function translateTextToEnglish(text: string): Promise<string> {
   try {
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(clean)}`;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
 
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeoutId);
@@ -322,7 +322,7 @@ async function translateTextToEnglish(text: string): Promise<string> {
       }
     }
   } catch (err) {
-    // Graceful fallback
+    // Fallback smoothly
   }
 
   // 2. High-Accuracy Dictionary Translation Fallback
@@ -343,7 +343,7 @@ async function translateTextToEnglish(text: string): Promise<string> {
   return translatedWords.join(' ');
 }
 
-// High-speed Batched translation for long videos (Handles 30s to 10+ minute videos instantaneously)
+// Non-blocking chunked translation for long videos (yields to browser main thread)
 export async function translateHindiWordsToEnglish(
   rawWords: CaptionWord[],
   onProgress?: (progress: number) => void
@@ -378,9 +378,9 @@ export async function translateHindiWordsToEnglish(
   }
   flush();
 
-  // Run translations in parallel batches of 6 chunks to prevent browser rate-limits
+  // Run translations in batches of 5 chunks and yield to main thread to prevent UI freezing
   const translatedTexts: string[] = new Array(chunks.length);
-  const BATCH_SIZE = 6;
+  const BATCH_SIZE = 5;
 
   for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
     const batch = chunks.slice(i, i + BATCH_SIZE);
@@ -394,6 +394,9 @@ export async function translateHindiWordsToEnglish(
     });
 
     await Promise.all(batchPromises);
+
+    // Yield control back to browser event loop
+    await new Promise((resolve) => setTimeout(resolve, 8));
 
     if (onProgress) {
       const pct = 70 + Math.round(((i + batch.length) / chunks.length) * 26);
@@ -489,7 +492,7 @@ export async function transcribeDirectAssemblyAI(
   for (let kIdx = 0; kIdx < keysToTry.length; kIdx++) {
     const activeKey = keysToTry[kIdx];
     try {
-      onProgress?.(25 + kIdx * 4);
+      onProgress?.(25 + kIdx * 3);
 
       // Step A: Upload audio binary stream to AssemblyAI CORS upload endpoint
       const uploadResponse = await fetch('https://api.assemblyai.com/v2/upload', {
@@ -597,7 +600,7 @@ export async function transcribeDirectAssemblyAI(
 
           // Handle language translation / transliteration
           if (languageMode === 'translate-en') {
-            onProgress?.(82);
+            onProgress?.(80);
             processedWords = await translateHindiWordsToEnglish(processedWords, onProgress);
           } else if (languageMode === 'romanized-hinglish') {
             processedWords = processedWords.map((w) => ({

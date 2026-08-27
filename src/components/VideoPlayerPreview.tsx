@@ -20,170 +20,26 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   onTimeUpdate,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const progressBarRef = useRef<HTMLDivElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
-  const [currentTimeMs, setCurrentTimeMs] = useState(0);
   const [durationMs, setDurationMs] = useState(0);
 
-  // Keep a stable ref for onTimeUpdate to avoid recreating effects
+  // Active phrase & word index (Only updated when the word changes to eliminate 60 FPS React re-renders)
+  const [activeSubtitle, setActiveSubtitle] = useState<{
+    phraseIndex: number;
+    activeWordIdx: number;
+  } | null>(null);
+
+  // Keep stable refs to avoid recreating animation frames
   const onTimeUpdateRef = useRef(onTimeUpdate);
   useEffect(() => {
     onTimeUpdateRef.current = onTimeUpdate;
   }, [onTimeUpdate]);
 
   const lastParentUpdateTimeRef = useRef(0);
-
-  // Synchronize external seek (e.g. from timeline editor)
-  useEffect(() => {
-    if (seekTimeMs !== null && videoRef.current) {
-      const targetSec = Math.max(0, seekTimeMs / 1000);
-      videoRef.current.currentTime = targetSec;
-      setCurrentTimeMs(seekTimeMs);
-      onTimeUpdateRef.current?.(seekTimeMs);
-    }
-  }, [seekTimeMs]);
-
-  // Main high-precision video playback & animation synchronization loop
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    let animFrameId: number;
-
-    const syncPlaybackTime = () => {
-      if (video && !video.paused) {
-        const ms = Math.round(video.currentTime * 1000);
-        setCurrentTimeMs(ms);
-
-        // Throttle parent onTimeUpdate to 150ms to prevent React render freezing
-        const now = performance.now();
-        if (now - lastParentUpdateTimeRef.current > 150) {
-          lastParentUpdateTimeRef.current = now;
-          onTimeUpdateRef.current?.(ms);
-        }
-      }
-      animFrameId = requestAnimationFrame(syncPlaybackTime);
-    };
-
-    const handleLoadedMetadata = () => {
-      if (video.duration && !isNaN(video.duration)) {
-        setDurationMs(Math.round(video.duration * 1000));
-      }
-      setIsBuffering(false);
-    };
-
-    const handlePlay = () => {
-      setIsPlaying(true);
-      setIsBuffering(false);
-      cancelAnimationFrame(animFrameId);
-      animFrameId = requestAnimationFrame(syncPlaybackTime);
-    };
-
-    const handlePlaying = () => {
-      setIsPlaying(true);
-      setIsBuffering(false);
-    };
-
-    const handlePause = () => {
-      setIsPlaying(false);
-      setIsBuffering(false);
-      cancelAnimationFrame(animFrameId);
-      if (video) {
-        const ms = Math.round(video.currentTime * 1000);
-        setCurrentTimeMs(ms);
-        onTimeUpdateRef.current?.(ms);
-      }
-    };
-
-    const handleWaiting = () => {
-      setIsBuffering(true);
-    };
-
-    const handleCanPlay = () => {
-      setIsBuffering(false);
-    };
-
-    const handleSeeking = () => {
-      if (video) {
-        const ms = Math.round(video.currentTime * 1000);
-        setCurrentTimeMs(ms);
-      }
-    };
-
-    const handleSeeked = () => {
-      if (video) {
-        const ms = Math.round(video.currentTime * 1000);
-        setCurrentTimeMs(ms);
-        onTimeUpdateRef.current?.(ms);
-      }
-      setIsBuffering(false);
-    };
-
-    const handleTimeUpdate = () => {
-      if (video) {
-        const ms = Math.round(video.currentTime * 1000);
-        setCurrentTimeMs(ms);
-      }
-    };
-
-    const handleEnded = () => {
-      setIsPlaying(false);
-      setIsBuffering(false);
-      cancelAnimationFrame(animFrameId);
-    };
-
-    video.addEventListener('loadedmetadata', handleLoadedMetadata);
-    video.addEventListener('play', handlePlay);
-    video.addEventListener('playing', handlePlaying);
-    video.addEventListener('pause', handlePause);
-    video.addEventListener('waiting', handleWaiting);
-    video.addEventListener('canplay', handleCanPlay);
-    video.addEventListener('seeking', handleSeeking);
-    video.addEventListener('seeked', handleSeeked);
-    video.addEventListener('timeupdate', handleTimeUpdate);
-    video.addEventListener('ended', handleEnded);
-
-    // Initial check
-    if (video.duration && !isNaN(video.duration)) {
-      setDurationMs(Math.round(video.duration * 1000));
-    }
-
-    return () => {
-      cancelAnimationFrame(animFrameId);
-      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
-      video.removeEventListener('play', handlePlay);
-      video.removeEventListener('playing', handlePlaying);
-      video.removeEventListener('pause', handlePause);
-      video.removeEventListener('waiting', handleWaiting);
-      video.removeEventListener('canplay', handleCanPlay);
-      video.removeEventListener('seeking', handleSeeking);
-      video.removeEventListener('seeked', handleSeeked);
-      video.removeEventListener('timeupdate', handleTimeUpdate);
-      video.removeEventListener('ended', handleEnded);
-    };
-  }, [videoUrl]);
-
-  // Safe play/pause handler
-  const handleTogglePlay = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    if (video.paused) {
-      if (video.ended) {
-        video.currentTime = 0;
-        setCurrentTimeMs(0);
-      }
-      const playPromise = video.play();
-      if (playPromise !== undefined) {
-        playPromise.catch((err) => {
-          console.warn('Playback resume handled smoothly:', err);
-        });
-      }
-    } else {
-      video.pause();
-    }
-  }, []);
+  const lastActiveWordRef = useRef<{ phraseIndex: number; wordIdx: number } | null>(null);
 
   // Sorted words to ensure 100% chronological consistency
   const sortedWords = useMemo(() => {
@@ -235,7 +91,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
     flushGroup();
 
-    // Fine-tune display intervals to prevent overlaps and hide captions during speech pauses
+    // Fine-tune display intervals to prevent overlaps and hide captions cleanly during pauses
     for (let i = 0; i < result.length; i++) {
       const nextPhrase = result[i + 1];
       if (nextPhrase) {
@@ -245,7 +101,6 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         } else if (gap <= 0) {
           result[i].displayUntil = Math.max(result[i].end, nextPhrase.start - 10);
         } else {
-          // Normal pause in speech: hide caption cleanly after spoken phrase
           result[i].displayUntil = result[i].end + 250;
         }
       } else {
@@ -256,58 +111,214 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     return result;
   }, [sortedWords]);
 
-  // Find the currently active phrase chunk and accurately synchronized spoken word
-  const activePhrase = useMemo(() => {
-    if (!phrases || phrases.length === 0) return null;
+  // Fast Binary Search to locate active phrase index in O(log N) instead of O(N) for long videos
+  const findPhraseIndex = useCallback((curMs: number): number => {
+    if (!phrases || phrases.length === 0) return -1;
 
-    // Active phrase match within audio window (with generous 60ms lead-in)
-    const current = phrases.find(
-      (p) => currentTimeMs >= p.start - 60 && currentTimeMs <= p.displayUntil
-    );
+    let low = 0;
+    let high = phrases.length - 1;
 
-    if (current) {
-      let activeIdx = -1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const p = phrases[mid];
 
-      // 1. Direct word boundary check
-      for (let i = 0; i < current.words.length; i++) {
-        const w = current.words[i];
-        if (currentTimeMs >= w.start && currentTimeMs <= w.end) {
-          activeIdx = i;
-          break;
-        }
+      if (curMs >= p.start - 60 && curMs <= p.displayUntil) {
+        return mid;
       }
 
-      // 2. Smooth micro-gap handover between words
-      if (activeIdx === -1) {
-        if (currentTimeMs < current.words[0].start) {
-          activeIdx = 0;
-        } else {
-          for (let i = current.words.length - 1; i >= 0; i--) {
-            if (currentTimeMs >= current.words[i].start) {
-              activeIdx = i;
+      if (curMs < p.start - 60) {
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
+    }
+
+    return -1;
+  }, [phrases]);
+
+  // Synchronize external seek (e.g. from timeline editor)
+  useEffect(() => {
+    if (seekTimeMs !== null && videoRef.current) {
+      const targetSec = Math.max(0, seekTimeMs / 1000);
+      videoRef.current.currentTime = targetSec;
+      
+      const pIdx = findPhraseIndex(seekTimeMs);
+      if (pIdx !== -1) {
+        const p = phrases[pIdx];
+        let wIdx = 0;
+        for (let i = 0; i < p.words.length; i++) {
+          if (seekTimeMs >= p.words[i].start) wIdx = i;
+        }
+        setActiveSubtitle({ phraseIndex: pIdx, activeWordIdx: wIdx });
+        lastActiveWordRef.current = { phraseIndex: pIdx, wordIdx: wIdx };
+      } else {
+        setActiveSubtitle(null);
+        lastActiveWordRef.current = null;
+      }
+
+      onTimeUpdateRef.current?.(seekTimeMs);
+    }
+  }, [seekTimeMs, findPhraseIndex, phrases]);
+
+  // High-performance RAF playback loop that NEVER causes React re-render lag
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    let animFrameId: number;
+
+    const checkSubtitleSync = () => {
+      if (video && !video.paused) {
+        const curMs = Math.round(video.currentTime * 1000);
+
+        // Update seekbar DOM directly with zero React overhead
+        if (progressBarRef.current && video.duration > 0) {
+          const pct = Math.min(100, Math.max(0, (video.currentTime / video.duration) * 100));
+          progressBarRef.current.style.width = `${pct}%`;
+        }
+
+        // Fast O(log N) Phrase Match
+        const phraseIdx = findPhraseIndex(curMs);
+        if (phraseIdx !== -1) {
+          const currentPhrase = phrases[phraseIdx];
+          let wordIdx = 0;
+
+          for (let i = 0; i < currentPhrase.words.length; i++) {
+            const w = currentPhrase.words[i];
+            if (curMs >= w.start && curMs <= w.end) {
+              wordIdx = i;
               break;
             }
+            if (curMs >= w.start) {
+              wordIdx = i;
+            }
           }
-          if (activeIdx === -1) activeIdx = 0;
+
+          // Only trigger React state change if the word or phrase actually changed!
+          const last = lastActiveWordRef.current;
+          if (!last || last.phraseIndex !== phraseIdx || last.wordIdx !== wordIdx) {
+            lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx };
+            setActiveSubtitle({ phraseIndex: phraseIdx, activeWordIdx: wordIdx });
+          }
+        } else {
+          if (lastActiveWordRef.current !== null) {
+            lastActiveWordRef.current = null;
+            setActiveSubtitle(null);
+          }
+        }
+
+        // Throttle parent onTimeUpdate to 160ms for smooth timeline list indicator
+        const now = performance.now();
+        if (now - lastParentUpdateTimeRef.current > 160) {
+          lastParentUpdateTimeRef.current = now;
+          onTimeUpdateRef.current?.(curMs);
         }
       }
 
-      return {
-        phrase: current,
-        activeWordIdx: activeIdx,
-      };
+      animFrameId = requestAnimationFrame(checkSubtitleSync);
+    };
+
+    const handleLoadedMetadata = () => {
+      if (video.duration && !isNaN(video.duration) && video.duration !== Infinity) {
+        setDurationMs(Math.round(video.duration * 1000));
+      }
+      setIsBuffering(false);
+    };
+
+    const handlePlay = () => {
+      setIsPlaying(true);
+      setIsBuffering(false);
+      cancelAnimationFrame(animFrameId);
+      animFrameId = requestAnimationFrame(checkSubtitleSync);
+    };
+
+    const handlePause = () => {
+      setIsPlaying(false);
+      setIsBuffering(false);
+      cancelAnimationFrame(animFrameId);
+      if (video) {
+        const curMs = Math.round(video.currentTime * 1000);
+        onTimeUpdateRef.current?.(curMs);
+      }
+    };
+
+    const handleWaiting = () => setIsBuffering(true);
+    const handleCanPlay = () => setIsBuffering(false);
+
+    const handleSeeked = () => {
+      if (video) {
+        const curMs = Math.round(video.currentTime * 1000);
+        if (progressBarRef.current && video.duration > 0) {
+          const pct = Math.min(100, Math.max(0, (video.currentTime / video.duration) * 100));
+          progressBarRef.current.style.width = `${pct}%`;
+        }
+        const pIdx = findPhraseIndex(curMs);
+        if (pIdx !== -1) {
+          const p = phrases[pIdx];
+          let wIdx = 0;
+          for (let i = 0; i < p.words.length; i++) {
+            if (curMs >= p.words[i].start) wIdx = i;
+          }
+          setActiveSubtitle({ phraseIndex: pIdx, activeWordIdx: wIdx });
+          lastActiveWordRef.current = { phraseIndex: pIdx, wordIdx: wIdx };
+        } else {
+          setActiveSubtitle(null);
+          lastActiveWordRef.current = null;
+        }
+        onTimeUpdateRef.current?.(curMs);
+      }
+      setIsBuffering(false);
+    };
+
+    const handleEnded = () => {
+      setIsPlaying(false);
+      setIsBuffering(false);
+      cancelAnimationFrame(animFrameId);
+    };
+
+    video.addEventListener('loadedmetadata', handleLoadedMetadata);
+    video.addEventListener('play', handlePlay);
+    video.addEventListener('playing', handlePlay);
+    video.addEventListener('pause', handlePause);
+    video.addEventListener('waiting', handleWaiting);
+    video.addEventListener('canplay', handleCanPlay);
+    video.addEventListener('seeked', handleSeeked);
+    video.addEventListener('ended', handleEnded);
+
+    if (video.duration && !isNaN(video.duration) && video.duration !== Infinity) {
+      setDurationMs(Math.round(video.duration * 1000));
     }
 
-    // Fallback: If video is paused right before the first phrase
-    if (currentTimeMs < phrases[0].start && !isPlaying && durationMs > 0) {
-      return {
-        phrase: phrases[0],
-        activeWordIdx: 0,
-      };
-    }
+    return () => {
+      cancelAnimationFrame(animFrameId);
+      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('play', handlePlay);
+      video.removeEventListener('playing', handlePlay);
+      video.removeEventListener('pause', handlePause);
+      video.removeEventListener('waiting', handleWaiting);
+      video.removeEventListener('canplay', handleCanPlay);
+      video.removeEventListener('seeked', handleSeeked);
+      video.removeEventListener('ended', handleEnded);
+    };
+  }, [videoUrl, phrases, findPhraseIndex]);
 
-    return null;
-  }, [phrases, currentTimeMs, isPlaying, durationMs]);
+  // Safe play/pause toggle
+  const handleTogglePlay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (video.paused) {
+      if (video.ended) {
+        video.currentTime = 0;
+      }
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => console.warn('Playback resume notice:', err));
+      }
+    } else {
+      video.pause();
+    }
+  }, []);
 
   // Preset styles
   const getWordStyle = (isCurrent: boolean, isPast: boolean) => {
@@ -345,16 +356,22 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     const rect = e.currentTarget.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const percentage = Math.max(0, Math.min(1, clickX / rect.width));
-    const newTimeMs = Math.round(percentage * durationMs);
-    videoRef.current.currentTime = newTimeMs / 1000;
-    setCurrentTimeMs(newTimeMs);
+    const newTimeSec = percentage * (durationMs / 1000);
+    videoRef.current.currentTime = newTimeSec;
+    const newTimeMs = Math.round(newTimeSec * 1000);
+    if (progressBarRef.current) {
+      progressBarRef.current.style.width = `${percentage * 100}%`;
+    }
     onTimeUpdateRef.current?.(newTimeMs);
   };
+
+  const currentActivePhrase = activeSubtitle !== null && phrases[activeSubtitle.phraseIndex]
+    ? phrases[activeSubtitle.phraseIndex]
+    : null;
 
   return (
     <div className="w-full bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm relative aspect-video flex items-center justify-center group select-none">
       {!videoUrl ? (
-        /* Empty / Placeholder State */
         <div className="text-center p-6 flex flex-col items-center justify-center">
           <div className="flex items-center gap-1.5 text-white font-bold text-2xl tracking-tight mb-1">
             <span>AutoCaption</span>
@@ -363,7 +380,6 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
           <p className="text-xs text-slate-400 font-medium">5GB Support • Real-time AI Precision Sync</p>
         </div>
       ) : (
-        /* Video Player + Subtitle Overlay */
         <div className="w-full h-full relative flex items-center justify-center bg-black">
           <video
             ref={videoRef}
@@ -377,14 +393,12 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             className="w-full h-full object-contain cursor-pointer"
           />
 
-          {/* Buffering Indicator */}
           {isBuffering && (
             <div className="absolute inset-0 m-auto w-12 h-12 rounded-full bg-black/70 backdrop-blur-xs flex items-center justify-center z-15 pointer-events-none">
               <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
             </div>
           )}
 
-          {/* Center Play Button Overlay when Paused */}
           {!isPlaying && !isBuffering && (
             <button
               type="button"
@@ -396,13 +410,13 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             </button>
           )}
 
-          {/* Synchronized Subtitles Overlay */}
-          {activePhrase && activePhrase.phrase.words.length > 0 && !isGenerating && (
+          {/* Precision Active Subtitles Overlay */}
+          {currentActivePhrase && currentActivePhrase.words.length > 0 && !isGenerating && (
             <div className="absolute bottom-12 inset-x-0 flex justify-center px-4 pointer-events-none z-20">
               <div className="bg-black/85 backdrop-blur-md px-5 py-3 rounded-2xl border border-white/20 shadow-[0_10px_35px_rgba(0,0,0,0.8)] flex items-center justify-center flex-wrap gap-2.5 text-center max-w-lg transition-all duration-75 animate-in fade-in zoom-in-95">
-                {activePhrase.phrase.words.map((w, idx) => {
-                  const isCurrent = idx === activePhrase.activeWordIdx;
-                  const isPast = idx < activePhrase.activeWordIdx;
+                {currentActivePhrase.words.map((w, idx) => {
+                  const isCurrent = activeSubtitle !== null && idx === activeSubtitle.activeWordIdx;
+                  const isPast = activeSubtitle !== null && idx < activeSubtitle.activeWordIdx;
                   const isLatin = /^[A-Za-z0-9\s.,!?'"%-]+$/.test(w.text || '');
                   return (
                     <span
@@ -431,10 +445,8 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
               className="w-full h-1.5 bg-white/20 hover:h-2.5 rounded-full cursor-pointer transition-all relative overflow-hidden"
             >
               <div
-                className="h-full bg-blue-500 rounded-full transition-all duration-75"
-                style={{
-                  width: `${durationMs > 0 ? (currentTimeMs / durationMs) * 100 : 0}%`,
-                }}
+                ref={progressBarRef}
+                className="h-full bg-blue-500 rounded-full w-0"
               />
             </div>
 
@@ -452,7 +464,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                   onClick={() => {
                     if (videoRef.current) {
                       videoRef.current.currentTime = 0;
-                      setCurrentTimeMs(0);
+                      if (progressBarRef.current) progressBarRef.current.style.width = '0%';
                       onTimeUpdateRef.current?.(0);
                     }
                   }}

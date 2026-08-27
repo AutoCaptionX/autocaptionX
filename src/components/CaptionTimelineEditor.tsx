@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { Clock, Edit3, Check, Plus, Trash2, Search, ChevronDown, ChevronUp, FastForward } from 'lucide-react';
+import React, { useState, useMemo, memo } from 'react';
+import { Clock, Edit3, Check, Plus, Trash2, Search, ChevronDown, ChevronUp } from 'lucide-react';
 import type { CaptionWord, CaptionPreset } from '../types';
 
 interface CaptionTimelineEditorProps {
@@ -10,6 +10,124 @@ interface CaptionTimelineEditorProps {
   preset: CaptionPreset;
   onPresetChange: (preset: CaptionPreset) => void;
 }
+
+const formatMs = (ms: number) => {
+  const totalSeconds = ms / 1000;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = (totalSeconds % 60).toFixed(1);
+  return `${minutes}:${seconds.padStart(4, '0')}`;
+};
+
+// Memoized individual timeline word item to prevent massive DOM re-renders on long videos
+const TimelineWordItem = memo(({
+  word,
+  originalIndex,
+  isActive,
+  isEditing,
+  editText,
+  onSeek,
+  onStartEdit,
+  onSaveEdit,
+  onEditTextChange,
+  onAdjustTiming,
+  onDeleteWord,
+}: {
+  word: CaptionWord;
+  originalIndex: number;
+  isActive: boolean;
+  isEditing: boolean;
+  editText: string;
+  onSeek: (ms: number) => void;
+  onStartEdit: (idx: number, text: string) => void;
+  onSaveEdit: (idx: number) => void;
+  onEditTextChange: (val: string) => void;
+  onAdjustTiming: (idx: number, deltaMs: number) => void;
+  onDeleteWord: (idx: number) => void;
+}) => {
+  return (
+    <div
+      className={`flex items-center justify-between p-2.5 rounded-xl border text-xs transition-all ${
+        isActive
+          ? 'bg-blue-950/80 border-blue-500 shadow-md ring-1 ring-blue-500/50'
+          : 'bg-slate-800/80 border-slate-700/80 hover:bg-slate-800 hover:border-slate-600'
+      }`}
+    >
+      <div
+        onClick={() => onSeek(word.start)}
+        className="flex items-center gap-2.5 flex-1 min-w-0 cursor-pointer"
+      >
+        <span className="font-mono text-[10px] text-slate-300 bg-slate-950 border border-slate-700 px-1.5 py-0.5 rounded shrink-0">
+          {formatMs(word.start)}
+        </span>
+
+        {isEditing ? (
+          <div className="flex items-center gap-1 flex-1" onClick={(e) => e.stopPropagation()}>
+            <input
+              type="text"
+              value={editText}
+              onChange={(e) => onEditTextChange(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && onSaveEdit(originalIndex)}
+              className="bg-slate-900 border border-blue-400 px-2 py-0.5 rounded text-white text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500 w-full"
+              autoFocus
+            />
+            <button
+              onClick={() => onSaveEdit(originalIndex)}
+              className="p-1 bg-blue-600 text-white rounded hover:bg-blue-700 cursor-pointer"
+            >
+              <Check className="w-3 h-3" />
+            </button>
+          </div>
+        ) : (
+          <span
+            className={`font-bold truncate ${
+              isActive ? 'text-blue-300 scale-105' : 'text-slate-100'
+            }`}
+          >
+            {word.text}
+          </span>
+        )}
+      </div>
+
+      {/* Micro Timing Adjust & Actions */}
+      <div className="flex items-center gap-1 shrink-0 ml-2" onClick={(e) => e.stopPropagation()}>
+        <button
+          onClick={() => onAdjustTiming(originalIndex, -50)}
+          className="px-1.5 py-0.5 text-[10px] bg-slate-900 border border-slate-700 hover:bg-slate-700 rounded text-slate-300 font-mono cursor-pointer"
+          title="-50ms"
+        >
+          -50ms
+        </button>
+        <button
+          onClick={() => onAdjustTiming(originalIndex, 50)}
+          className="px-1.5 py-0.5 text-[10px] bg-slate-900 border border-slate-700 hover:bg-slate-700 rounded text-slate-300 font-mono cursor-pointer"
+          title="+50ms"
+        >
+          +50ms
+        </button>
+
+        {!isEditing && (
+          <button
+            onClick={() => onStartEdit(originalIndex, word.text)}
+            className="p-1 text-slate-400 hover:text-slate-200 rounded hover:bg-slate-700 cursor-pointer ml-1"
+            title="Edit text"
+          >
+            <Edit3 className="w-3 h-3" />
+          </button>
+        )}
+
+        <button
+          onClick={() => onDeleteWord(originalIndex)}
+          className="p-1 text-slate-400 hover:text-red-400 rounded hover:bg-red-950/50 cursor-pointer"
+          title="Delete word"
+        >
+          <Trash2 className="w-3 h-3" />
+        </button>
+      </div>
+    </div>
+  );
+});
+
+TimelineWordItem.displayName = 'TimelineWordItem';
 
 export const CaptionTimelineEditor: React.FC<CaptionTimelineEditorProps> = ({
   words,
@@ -65,18 +183,19 @@ export const CaptionTimelineEditor: React.FC<CaptionTimelineEditorProps> = ({
     onUpdateWords([...words, newWord]);
   };
 
-  const formatMs = (ms: number) => {
-    const totalSeconds = ms / 1000;
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = (totalSeconds % 60).toFixed(1);
-    return `${minutes}:${seconds.padStart(4, '0')}`;
-  };
-
   // Filter words for fast searching across long videos
-  const filteredWords = useMemo(() => {
-    if (!searchQuery.trim()) return words;
+  const filteredWordsWithIndices = useMemo(() => {
+    if (!searchQuery.trim()) {
+      return words.map((w, idx) => ({ word: w, originalIndex: idx }));
+    }
     const q = searchQuery.toLowerCase();
-    return words.filter((w) => w.text.toLowerCase().includes(q));
+    const list: Array<{ word: CaptionWord; originalIndex: number }> = [];
+    for (let i = 0; i < words.length; i++) {
+      if (words[i].text.toLowerCase().includes(q)) {
+        list.push({ word: words[i], originalIndex: i });
+      }
+    }
+    return list;
   }, [words, searchQuery]);
 
   return (
@@ -151,92 +270,25 @@ export const CaptionTimelineEditor: React.FC<CaptionTimelineEditorProps> = ({
           </div>
 
           <div className="max-h-72 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
-            {filteredWords.map((w, idx) => {
-              const originalIndex = words.indexOf(w);
-              const isActive = currentTimeMs >= w.start && currentTimeMs <= w.end;
+            {filteredWordsWithIndices.map(({ word, originalIndex }) => {
+              const isActive = currentTimeMs >= word.start && currentTimeMs <= word.end;
               const isEditing = editingIndex === originalIndex;
 
               return (
-                <div
-                  key={`${w.text}-${w.start}-${originalIndex}`}
-                  className={`flex items-center justify-between p-2.5 rounded-xl border text-xs transition-all ${
-                    isActive
-                      ? 'bg-blue-950/70 border-blue-500 shadow-md ring-1 ring-blue-500/50'
-                      : 'bg-slate-800/80 border-slate-700/80 hover:bg-slate-800 hover:border-slate-600'
-                  }`}
-                >
-                  <div
-                    onClick={() => onSeek(w.start)}
-                    className="flex items-center gap-2.5 flex-1 min-w-0 cursor-pointer"
-                  >
-                    <span className="font-mono text-[10px] text-slate-300 bg-slate-950 border border-slate-700 px-1.5 py-0.5 rounded shrink-0">
-                      {formatMs(w.start)}
-                    </span>
-
-                    {isEditing ? (
-                      <div className="flex items-center gap-1 flex-1" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          type="text"
-                          value={editText}
-                          onChange={(e) => setEditText(e.target.value)}
-                          onKeyDown={(e) => e.key === 'Enter' && handleSaveEdit(originalIndex)}
-                          className="bg-slate-900 border border-blue-400 px-2 py-0.5 rounded text-white text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500 w-full"
-                          autoFocus
-                        />
-                        <button
-                          onClick={() => handleSaveEdit(originalIndex)}
-                          className="p-1 bg-blue-600 text-white rounded hover:bg-blue-700 cursor-pointer"
-                        >
-                          <Check className="w-3 h-3" />
-                        </button>
-                      </div>
-                    ) : (
-                      <span
-                        className={`font-bold truncate ${
-                          isActive ? 'text-blue-300 scale-105' : 'text-slate-100'
-                        }`}
-                      >
-                        {w.text}
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Micro Timing Adjust & Actions */}
-                  <div className="flex items-center gap-1 shrink-0 ml-2" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      onClick={() => handleAdjustTiming(originalIndex, -50)}
-                      className="px-1.5 py-0.5 text-[10px] bg-slate-900 border border-slate-700 hover:bg-slate-700 rounded text-slate-300 font-mono cursor-pointer"
-                      title="-50ms"
-                    >
-                      -50ms
-                    </button>
-                    <button
-                      onClick={() => handleAdjustTiming(originalIndex, 50)}
-                      className="px-1.5 py-0.5 text-[10px] bg-slate-900 border border-slate-700 hover:bg-slate-700 rounded text-slate-300 font-mono cursor-pointer"
-                      title="+50ms"
-                    >
-                      +50ms
-                    </button>
-
-                    {!isEditing && (
-                      <button
-                        onClick={() => handleStartEdit(originalIndex, w.text)}
-                        className="p-1 text-slate-400 hover:text-slate-200 rounded hover:bg-slate-700 cursor-pointer ml-1"
-                        title="Edit text"
-                      >
-                        <Edit3 className="w-3 h-3" />
-                      </button>
-                    )}
-
-                    <button
-                      onClick={() => handleDeleteWord(originalIndex)}
-                      className="p-1 text-slate-400 hover:text-red-400 rounded hover:bg-red-950/50 cursor-pointer"
-                      title="Delete word"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
+                <TimelineWordItem
+                  key={`${word.text}-${word.start}-${originalIndex}`}
+                  word={word}
+                  originalIndex={originalIndex}
+                  isActive={isActive}
+                  isEditing={isEditing}
+                  editText={editText}
+                  onSeek={onSeek}
+                  onStartEdit={handleStartEdit}
+                  onSaveEdit={handleSaveEdit}
+                  onEditTextChange={setEditText}
+                  onAdjustTiming={handleAdjustTiming}
+                  onDeleteWord={handleDeleteWord}
+                />
               );
             })}
           </div>

@@ -185,19 +185,12 @@ export default function App() {
     setIsGenerating(true);
     setProgress(10);
 
-    const progressInterval = setInterval(() => {
-      setProgress((prev) => {
-        if (prev >= 88) return prev;
-        return prev + Math.floor(Math.random() * 6) + 4;
-      });
-    }, 450);
-
     const activeKey = localStorage.getItem('autocaption_assembly_key')?.trim() || DEFAULT_ASSEMBLY_KEY;
 
     try {
       let data: any = null;
 
-      // 1. Try Backend Express endpoint
+      // 1. Try Backend Express endpoint if running on full-stack server
       try {
         const formData = new FormData();
         formData.append('file', selectedFile);
@@ -257,7 +250,6 @@ export default function App() {
         }
       }
 
-      clearInterval(progressInterval);
       setProgress(100);
 
       // In case speech is not detected or audio track is empty, generate baseline synced structure
@@ -322,7 +314,6 @@ export default function App() {
         showToast(successNotice);
       }
     } catch (err: any) {
-      clearInterval(progressInterval);
       console.error('Caption generation error:', err);
       showToast(`Notice: ${err.message || 'Processing captions'}`);
     } finally {

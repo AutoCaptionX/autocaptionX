@@ -71,6 +71,32 @@ async function getAccurateVideoDuration(video: HTMLVideoElement): Promise<number
   });
 }
 
+// Fast Binary Search for active subtitle phrase
+function findActivePhraseIndex(
+  phrases: Array<{ words: CaptionWord[]; start: number; end: number; displayUntil: number }>,
+  curMs: number
+): number {
+  let low = 0;
+  let high = phrases.length - 1;
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const p = phrases[mid];
+
+    if (curMs >= p.start - 60 && curMs <= p.displayUntil) {
+      return mid;
+    }
+
+    if (curMs < p.start - 60) {
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+
+  return -1;
+}
+
 // Export 100% Full-Length Burned-In Captioned Video
 export async function renderCaptionedVideo(
   videoSourceUrl: string,
@@ -304,12 +330,11 @@ export async function renderCaptionedVideo(
 
         // Check if video has reached its real complete end
         if (video.ended || (video.currentTime >= totalVideoDuration - 0.05 && video.currentTime > 0.5)) {
-          // Draw the absolute final frame
           ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
           const curMs = Math.round(video.currentTime * 1000);
-          const currentPhrase = phrases.find((p) => curMs >= p.start && curMs <= p.displayUntil);
-          if (currentPhrase) {
-            renderSubtitlesOnCanvas(ctx, currentPhrase, curMs, preset, targetWidth, targetHeight);
+          const pIdx = findActivePhraseIndex(phrases, curMs);
+          if (pIdx !== -1) {
+            renderSubtitlesOnCanvas(ctx, phrases[pIdx], curMs, preset, targetWidth, targetHeight);
           }
 
           onProgress?.(99, 'Finalizing video stream...');
@@ -320,11 +345,11 @@ export async function renderCaptionedVideo(
         // Draw current video frame to canvas
         ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
 
-        // Find active subtitle and burn it onto canvas
+        // Find active subtitle with binary search and burn it onto canvas
         const curMs = Math.round(video.currentTime * 1000);
-        const currentPhrase = phrases.find((p) => curMs >= p.start && curMs <= p.displayUntil);
-        if (currentPhrase) {
-          renderSubtitlesOnCanvas(ctx, currentPhrase, curMs, preset, targetWidth, targetHeight);
+        const pIdx = findActivePhraseIndex(phrases, curMs);
+        if (pIdx !== -1) {
+          renderSubtitlesOnCanvas(ctx, phrases[pIdx], curMs, preset, targetWidth, targetHeight);
         }
 
         const pct = Math.min(98, Math.round((video.currentTime / Math.max(1, totalVideoDuration)) * 85) + 12);
@@ -424,7 +449,6 @@ function renderSubtitlesOnCanvas(
 
   // Draw Subtitle Background Pill
   const paddingX = Math.round(baseFontSize * 0.9);
-  const paddingY = Math.round(baseFontSize * 0.55);
   const pillWidth = totalPhraseWidth + paddingX * 2;
   const pillHeight = baseFontSize * 1.8;
   const pillX = (width - pillWidth) / 2;

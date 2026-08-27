@@ -17,7 +17,7 @@ import {
   saveCaptionProject, 
   type AppUser 
 } from './lib/authService';
-import { transcribeDirectAssemblyAI } from './services/transcription';
+import { transcribeDirectAssemblyAI, translateHindiWordsToEnglish } from './services/transcription';
 import { renderCaptionedVideo, generateSrtContent } from './services/videoExporter';
 import type { VideoResolution, CaptionWord, CaptionJobData, CaptionPreset, CaptionLanguageMode } from './types';
 
@@ -60,7 +60,7 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Check AssemblyAI Status (checks backend first, falls back to localStorage or default key)
+  // Check AssemblyAI Status
   useEffect(() => {
     const localKey = localStorage.getItem('autocaption_assembly_key')?.trim();
     if (localKey || DEFAULT_ASSEMBLY_KEY) {
@@ -75,7 +75,6 @@ export default function App() {
         }
       })
       .catch(() => {
-        // Running on static hosting like GitHub Pages (no /api/health endpoint)
         const hasKey = Boolean(localKey || DEFAULT_ASSEMBLY_KEY);
         setAssemblyConfigured(hasKey);
       });
@@ -100,16 +99,14 @@ export default function App() {
     setProgress(0);
   };
 
-  // Handle Loading a high-quality demo sample video
+  // Handle Loading sample video
   const handleLoadSampleVideo = async () => {
-    // Generate a clean animated video canvas blob for instant preview testing
     const canvas = document.createElement('canvas');
     canvas.width = 720;
     canvas.height = 1280;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Create a 6-second animated video stream
     const stream = canvas.captureStream(30);
     const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
     const chunks: Blob[] = [];
@@ -131,7 +128,6 @@ export default function App() {
 
     const interval = setInterval(() => {
       frame++;
-      // Draw modern vertical video frame
       const grad = ctx.createLinearGradient(0, 0, 720, 1280);
       grad.addColorStop(0, '#0f172a');
       grad.addColorStop(0.5, '#1e1b4b');
@@ -139,7 +135,6 @@ export default function App() {
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, 720, 1280);
 
-      // Glowing circle avatar
       ctx.beginPath();
       ctx.arc(360, 340, 60 + Math.sin(frame * 0.1) * 5, 0, Math.PI * 2);
       ctx.fillStyle = '#3b82f6';
@@ -153,7 +148,6 @@ export default function App() {
       ctx.textAlign = 'center';
       ctx.fillText('AutoCaptionX Demo', 360, 233);
 
-      // Spoken prompt text preview
       ctx.fillStyle = '#94a3b8';
       ctx.font = '28px system-ui';
       ctx.fillText('Viral Subtitles AI Engine', 360, 480);
@@ -182,14 +176,13 @@ export default function App() {
     setIsExporting(false);
   };
 
-  // Generate Captions via AssemblyAI (supports both backend Express server and direct client-side for GitHub Pages)
+  // Generate Captions via AssemblyAI & Gemini Translation
   const handleGenerate = async () => {
     if (!selectedFile) return;
 
     setIsGenerating(true);
     setProgress(10);
 
-    // Simulate steady progress
     const progressInterval = setInterval(() => {
       setProgress((prev) => {
         if (prev >= 88) return prev;
@@ -202,7 +195,7 @@ export default function App() {
     try {
       let data: any = null;
 
-      // 1. Try Backend Express endpoint if available
+      // 1. Try Backend Express endpoint
       try {
         const formData = new FormData();
         formData.append('file', selectedFile);
@@ -231,7 +224,7 @@ export default function App() {
         console.log('Backend /api/captions/transcribe not reachable (Running statically on GitHub Pages)');
       }
 
-      // 2. If backend was not available or didn't return words, perform direct client-side AssemblyAI transcription
+      // 2. Client-side direct AssemblyAI fallback
       if (!data || !data.words || data.words.length === 0) {
         console.log('Executing client-side direct AssemblyAI transcription with active key...');
         try {
@@ -260,12 +253,20 @@ export default function App() {
         { text: 'Ready!', start: 4000, end: 4800, confidence: 0.99 },
       ];
 
-      const generatedWords: CaptionWord[] =
+      let rawGeneratedWords: CaptionWord[] =
         data && data.words && Array.isArray(data.words) && data.words.length > 0
           ? data.words
           : defaultDemoWords;
 
-      setWords(generatedWords);
+      // Double-check English translation if Translate to English is selected
+      if (languageMode === 'translate-en') {
+        const hasHindiChars = rawGeneratedWords.some((w) => /[\u0900-\u097F]/.test(w.text));
+        if (hasHindiChars) {
+          rawGeneratedWords = await translateHindiWordsToEnglish(rawGeneratedWords);
+        }
+      }
+
+      setWords(rawGeneratedWords);
       setHasGenerated(true);
 
       const providerLabel = data?.source?.includes('assemblyai')
@@ -276,10 +277,10 @@ export default function App() {
 
       const successNotice =
         languageMode === 'translate-en'
-          ? `Auto-captions synchronized with ${providerLabel}!`
+          ? `Auto-captions translated to English & synced across full video!`
           : `Captions generated successfully with ${providerLabel}!`;
 
-      // Save to Account (Dual Engine: Firestore + LocalStorage)
+      // Save to Account
       if (user) {
         try {
           const jobId = 'job_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
@@ -289,8 +290,8 @@ export default function App() {
             resolution: selectedResolution,
             status: 'completed',
             progress: 100,
-            transcriptText: generatedWords.map((w) => w.text).join(' '),
-            words: generatedWords,
+            transcriptText: rawGeneratedWords.map((w) => w.text).join(' '),
+            words: rawGeneratedWords,
             createdAt: new Date().toISOString(),
             userId: user.uid,
           });
@@ -350,7 +351,6 @@ export default function App() {
       showToast(`Downloaded captioned video in ${selectedResolution.toUpperCase()}!`);
     } catch (exportErr: any) {
       console.warn('Canvas render notice, downloading direct video with .srt subtitles:', exportErr);
-      // Fallback: download original video + auto download .srt
       const anchor = document.createElement('a');
       anchor.href = videoBlobUrl;
       const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');

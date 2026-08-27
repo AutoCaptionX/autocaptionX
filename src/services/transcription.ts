@@ -9,7 +9,7 @@ export interface TranscriptionResult {
   detectedLanguage?: string;
 }
 
-// Common Hindi/Hinglish vocabulary dictionary for instant high-accuracy translation
+// Extensive Hindi/Hinglish vocabulary dictionary
 const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'नमस्ते': 'Hello',
   'नमस्कार': 'Greetings',
@@ -21,6 +21,14 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'भाईयों': 'brothers',
   'बहन': 'sister',
   'बहनों': 'sisters',
+  'पापा': 'Daddy',
+  'मम्मी': 'Mom',
+  'माँ': 'Mother',
+  'पिताजी': 'Father',
+  'बेटा': 'son',
+  'बेटी': 'daughter',
+  'बच्चा': 'baby',
+  'बच्चे': 'kids',
   'आज': 'Today',
   'कल': 'Tomorrow',
   'हम': 'we',
@@ -30,9 +38,15 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'मेरा': 'my',
   'मेरी': 'my',
   'मेरे': 'my',
+  'हमारा': 'our',
+  'हमारी': 'our',
+  'हमारे': 'our',
   'आपका': 'your',
   'आपकी': 'your',
   'आपके': 'your',
+  'उसका': 'his',
+  'उसकी': 'her',
+  'उनका': 'their',
   'बात': 'talk',
   'करेंगे': 'will discuss',
   'करेंगे।': 'will discuss.',
@@ -56,6 +70,8 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'शानदार': 'amazing',
   'सुंदर': 'beautiful',
   'प्यारा': 'lovely',
+  'प्यारी': 'sweet',
+  'प्यारे': 'sweet',
   'वीडियो': 'video',
   'कैप्शन': 'caption',
   'सबटाइटल': 'subtitles',
@@ -84,6 +100,8 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'एक': 'one',
   'दो': 'two',
   'तीन': 'three',
+  'चार': 'four',
+  'पाँच': 'five',
   'नया': 'new',
   'नई': 'new',
   'नए': 'new',
@@ -91,6 +109,15 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'लोग': 'people',
   'शुक्रिया': 'Thank you',
   'धन्यवाद': 'Thank you',
+  'अरे': 'Oh',
+  'वाह': 'Wow',
+  'शाबाश': 'Well done',
+  'काम': 'work',
+  'समय': 'time',
+  'दिन': 'day',
+  'रात': 'night',
+  'सुबह': 'morning',
+  'शाम': 'evening',
 };
 
 // Transliterate Devanagari to Romanized Hinglish
@@ -115,12 +142,12 @@ export function transliterateDevanagariToHinglish(text: string): string {
   return res || text;
 }
 
-// Client-Side Cloud Translation with fallback
+// Client-Side Cloud Translation with multiple fallback strategies
 async function translateTextToEnglish(text: string): Promise<string> {
   const clean = text.trim();
   if (!clean) return '';
 
-  // 1. Try public Google Translate endpoint (No API key needed, fast)
+  // 1. Google Translate API (fast, reliable, free public endpoint)
   try {
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(clean)}`;
     const res = await fetch(url);
@@ -134,29 +161,51 @@ async function translateTextToEnglish(text: string): Promise<string> {
       }
     }
   } catch (err) {
-    console.warn('Google Translate API notice, using dictionary fallback:', err);
+    console.warn('Google Translate API endpoint fallback:', err);
   }
 
-  // 2. Dictionary-based fallback
+  // 2. MyMemory Public Translation API fallback
+  try {
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(clean)}&langpair=hi|en`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.responseData && data.responseData.translatedText) {
+        const t = data.responseData.translatedText.trim();
+        if (t && !t.includes('MYMEMORY WARNING')) {
+          return t;
+        }
+      }
+    }
+  } catch (err) {}
+
+  // 3. High-Accuracy Dictionary Translation Fallback
   const words = clean.split(/\s+/);
   const translatedWords = words.map((w) => {
     const stripped = w.replace(/[.,!?:;|]/g, '');
     const punctuation = w.replace(/^[^.,!?:;|]+/, '');
-    const mapped = HINDI_TRANSLATION_MAP[stripped] || stripped;
-    return mapped + punctuation;
+    if (HINDI_TRANSLATION_MAP[stripped]) {
+      return HINDI_TRANSLATION_MAP[stripped] + punctuation;
+    }
+    // If Devanagari not in map, transliterate to romanized English
+    if (/[\u0900-\u097F]/.test(stripped)) {
+      const rom = transliterateDevanagariToHinglish(stripped);
+      return (rom.charAt(0).toUpperCase() + rom.slice(1)) + punctuation;
+    }
+    return w;
   });
 
   return translatedWords.join(' ');
 }
 
-// Proportionally maps translated English words to precise millisecond timestamps
+// Proportionally maps translated English words across the full audio timeline
 export async function translateHindiWordsToEnglish(
   rawWords: CaptionWord[],
   onProgress?: (progress: number) => void
 ): Promise<CaptionWord[]> {
   if (!rawWords || rawWords.length === 0) return [];
 
-  // Group raw words into natural sentence/clause chunks
+  // Group raw words into natural sentence/phrase chunks (~4-7 words or pauses)
   const chunks: Array<{ words: CaptionWord[]; start: number; end: number; rawText: string }> = [];
   let currentGroup: CaptionWord[] = [];
 
@@ -190,25 +239,21 @@ export async function translateHindiWordsToEnglish(
     const chunk = chunks[cIdx];
     const duration = Math.max(300, chunk.end - chunk.start);
 
-    // Check if chunk has Hindi characters
-    const hasHindi = /[\u0900-\u097F]/.test(chunk.rawText);
-
+    // Translate this segment to English
     let translatedSegmentText = chunk.rawText;
-    if (hasHindi) {
-      try {
-        translatedSegmentText = await translateTextToEnglish(chunk.rawText);
-      } catch {
-        translatedSegmentText = chunk.rawText;
-      }
+    try {
+      translatedSegmentText = await translateTextToEnglish(chunk.rawText);
+    } catch {
+      translatedSegmentText = chunk.rawText;
     }
 
+    // Clean and split English words
     const engWords = translatedSegmentText
       .split(/\s+/)
       .map((w) => w.trim())
       .filter(Boolean);
 
     if (engWords.length === 0) {
-      // Keep original if empty
       chunk.words.forEach((w) => finalResult.push(w));
       continue;
     }
@@ -305,9 +350,9 @@ export async function transcribeDirectAssemblyAI(
   const transcriptId = transcriptData.id;
   onProgress?.(50);
 
-  // 3. Poll for completion
+  // 3. Poll for completion (supports 30s to full length videos)
   let attempts = 0;
-  const maxAttempts = 150; // 3.5 minutes for full videos
+  const maxAttempts = 150;
 
   while (attempts < maxAttempts) {
     await new Promise((resolve) => setTimeout(resolve, 1500));

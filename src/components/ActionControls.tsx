@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sparkles, Download, RotateCcw, Loader2, ShieldAlert } from 'lucide-react';
+import { Sparkles, Download, RotateCcw, Loader2, ShieldAlert, FileText, Film } from 'lucide-react';
 import type { VideoResolution } from '../types';
 
 interface ActionControlsProps {
@@ -8,8 +8,12 @@ interface ActionControlsProps {
   progress: number;
   hasGeneratedCaptions: boolean;
   selectedResolution: VideoResolution;
+  isExporting?: boolean;
+  exportProgress?: number;
+  exportStatusText?: string;
   onGenerate: () => void;
   onDownload: () => void;
+  onDownloadSrt?: () => void;
   onReset: () => void;
 }
 
@@ -19,8 +23,12 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
   progress,
   hasGeneratedCaptions,
   selectedResolution,
+  isExporting = false,
+  exportProgress = 0,
+  exportStatusText = '',
   onGenerate,
   onDownload,
+  onDownloadSrt,
   onReset,
 }) => {
   const getResolutionLabel = () => {
@@ -38,13 +46,13 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
 
   return (
     <div className="w-full space-y-3.5">
-      {/* Progress Bar when Generating */}
+      {/* Progress Bar when Generating Captions */}
       {isGenerating && (
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2 shadow-sm animate-in fade-in duration-200">
           <div className="flex items-center justify-between text-xs font-medium text-slate-300">
             <span className="flex items-center gap-2 text-blue-400 font-semibold">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              Generating captions and syncing subtitles...
+              Transcribing & syncing word timestamps...
             </span>
             <span className="font-mono font-bold text-blue-400">{progress}%</span>
           </div>
@@ -57,14 +65,33 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
         </div>
       )}
 
+      {/* Progress Bar when Exporting/Burning Video */}
+      {isExporting && (
+        <div className="bg-slate-900 border border-blue-800/80 rounded-xl p-3.5 space-y-2 shadow-sm animate-in fade-in duration-200">
+          <div className="flex items-center justify-between text-xs font-medium text-slate-200">
+            <span className="flex items-center gap-2 text-blue-400 font-semibold">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              {exportStatusText || 'Burning animated captions into video...'}
+            </span>
+            <span className="font-mono font-bold text-blue-400">{exportProgress}%</span>
+          </div>
+          <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+            <div
+              className="bg-gradient-to-r from-blue-500 to-indigo-500 h-full rounded-full transition-all duration-200 shadow-xs"
+              style={{ width: `${exportProgress}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Main Action Buttons */}
       <div className="space-y-2.5">
         <button
           type="button"
-          disabled={!hasVideo || isGenerating}
+          disabled={!hasVideo || isGenerating || isExporting}
           onClick={onGenerate}
           className={`w-full py-3 px-4 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 select-none shadow-md ${
-            !hasVideo || isGenerating
+            !hasVideo || isGenerating || isExporting
               ? 'bg-slate-850/80 text-slate-500 cursor-not-allowed border border-slate-800'
               : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/20 cursor-pointer active:scale-[0.99]'
           }`}
@@ -75,21 +102,44 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
 
         <button
           type="button"
-          disabled={!hasGeneratedCaptions || isGenerating}
+          disabled={!hasGeneratedCaptions || isGenerating || isExporting}
           onClick={onDownload}
           className={`w-full py-3 px-4 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 select-none shadow-md ${
-            !hasGeneratedCaptions || isGenerating
+            !hasGeneratedCaptions || isGenerating || isExporting
               ? 'bg-slate-850/80 text-slate-500 cursor-not-allowed border border-slate-800'
-              : 'bg-slate-800 hover:bg-slate-750 text-white border border-slate-700 shadow-slate-900/40 cursor-pointer active:scale-[0.99]'
+              : 'bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-500/30 shadow-emerald-950/40 cursor-pointer active:scale-[0.99]'
           }`}
         >
-          <Download className="w-4 h-4" />
-          Download ({getResolutionLabel()})
+          {isExporting ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>Rendering Video ({exportProgress}%)...</span>
+            </>
+          ) : (
+            <>
+              <Film className="w-4 h-4" />
+              <span>Download Captioned Video ({getResolutionLabel()})</span>
+            </>
+          )}
         </button>
+
+        {/* Subtitle SRT Download Option */}
+        {hasGeneratedCaptions && !isGenerating && !isExporting && onDownloadSrt && (
+          <div className="flex items-center justify-center pt-1">
+            <button
+              type="button"
+              onClick={onDownloadSrt}
+              className="text-xs text-slate-400 hover:text-blue-400 transition-colors flex items-center gap-1.5 py-1 px-3 rounded-lg hover:bg-slate-800/80 cursor-pointer font-medium"
+            >
+              <FileText className="w-3.5 h-3.5 text-blue-400" />
+              <span>Download Subtitle File (.SRT)</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Start new video button */}
-      {hasGeneratedCaptions && !isGenerating && (
+      {hasGeneratedCaptions && !isGenerating && !isExporting && (
         <div className="flex justify-center pt-1">
           <button
             type="button"
@@ -104,7 +154,7 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
       {/* Privacy Notice */}
       <div className="pt-2 flex items-center justify-center gap-1.5 text-[11px] text-slate-500 text-center">
         <ShieldAlert className="w-3.5 h-3.5 shrink-0 text-slate-500" />
-        <span>Your uploaded and generated files are permanently deleted after download.</span>
+        <span>Subtitles are burned directly into your video in high definition.</span>
       </div>
     </div>
   );

@@ -18,6 +18,7 @@ import {
   type AppUser 
 } from './lib/authService';
 import { transcribeDirectAssemblyAI } from './services/transcription';
+import { renderCaptionedVideo, generateSrtContent } from './services/videoExporter';
 import type { VideoResolution, CaptionWord, CaptionJobData, CaptionPreset, CaptionLanguageMode } from './types';
 
 const DEFAULT_ASSEMBLY_KEY = '75c993a46b784bc4a66e8481b5c4812f';
@@ -45,6 +46,11 @@ export default function App() {
   const [hasGenerated, setHasGenerated] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  // Video Export / Burn-In State
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportStatusText, setExportStatusText] = useState('');
+
   // Universal Auth State Listener (Syncs Firebase + LocalStorage Auth)
   useEffect(() => {
     const unsubscribe = subscribeToAuthChanges((currentUser) => {
@@ -68,7 +74,7 @@ export default function App() {
           setAssemblyConfigured(data.assemblyaiConfigured || Boolean(localKey) || Boolean(DEFAULT_ASSEMBLY_KEY));
         }
       })
-      .catch((err) => {
+      .catch(() => {
         // Running on static hosting like GitHub Pages (no /api/health endpoint)
         const hasKey = Boolean(localKey || DEFAULT_ASSEMBLY_KEY);
         setAssemblyConfigured(hasKey);
@@ -96,7 +102,7 @@ export default function App() {
 
   // Handle Loading a high-quality demo sample video
   const handleLoadSampleVideo = async () => {
-    // Generate a simple animated video canvas blob for instant preview testing
+    // Generate a clean animated video canvas blob for instant preview testing
     const canvas = document.createElement('canvas');
     canvas.width = 720;
     canvas.height = 1280;
@@ -109,43 +115,38 @@ export default function App() {
     const chunks: Blob[] = [];
 
     recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunks.push(e.data);
+      if (e.data && e.data.size > 0) chunks.push(e.data);
     };
 
     recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: 'video/webm' });
-      const sampleFile = new File([blob], 'AutoCaptionX_Demo_Shorts.webm', {
-        type: 'video/webm',
-      });
-      handleFileSelect(sampleFile);
-      showToast('Loaded demo video! Click "Create Captions" to generate auto subtitles.');
+      const blob = new Blob(chunks, { type: 'video/mp4' });
+      const testFile = new File([blob], 'demo_sample_reel.mp4', { type: 'video/mp4' });
+      handleFileSelect(testFile);
+      showToast('Loaded demo sample video! Click "Create Captions" to see AI in action.');
     };
 
     recorder.start();
-
     let frame = 0;
-    const maxFrames = 180; // 6 seconds at 30 fps
+    const maxFrames = 180; // 6 seconds at 30fps
+
     const interval = setInterval(() => {
       frame++;
-      // Background gradient
-      const grad = ctx.createLinearGradient(0, 0, 0, 1280);
+      // Draw modern vertical video frame
+      const grad = ctx.createLinearGradient(0, 0, 720, 1280);
       grad.addColorStop(0, '#0f172a');
       grad.addColorStop(0.5, '#1e1b4b');
-      grad.addColorStop(1, '#020617');
+      grad.addColorStop(1, '#0f172a');
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, 720, 1280);
 
-      // Ambient glowing circle
+      // Glowing circle avatar
       ctx.beginPath();
-      ctx.arc(360, 640, 180 + Math.sin(frame / 10) * 20, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(59, 130, 246, 0.15)';
-      ctx.fill();
-
-      // Video Demo Badge
+      ctx.arc(360, 340, 60 + Math.sin(frame * 0.1) * 5, 0, Math.PI * 2);
       ctx.fillStyle = '#3b82f6';
-      ctx.beginPath();
-      ctx.roundRect(240, 200, 240, 50, 25);
       ctx.fill();
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#60a5fa';
+      ctx.stroke();
 
       ctx.fillStyle = '#ffffff';
       ctx.font = 'bold 22px system-ui';
@@ -178,6 +179,7 @@ export default function App() {
     setWords([]);
     setHasGenerated(false);
     setProgress(0);
+    setIsExporting(false);
   };
 
   // Generate Captions via AssemblyAI (supports both backend Express server and direct client-side for GitHub Pages)
@@ -309,19 +311,78 @@ export default function App() {
     }
   };
 
-  // Download Captioned Video
-  const handleDownload = () => {
+  // Download Captioned Video with Subtitles Burned In
+  const handleDownload = async () => {
     if (!videoBlobUrl || !selectedFile) return;
 
+    if (words.length === 0) {
+      showToast('Please generate captions first before downloading.');
+      return;
+    }
+
+    setIsExporting(true);
+    setExportProgress(5);
+    setExportStatusText('Rendering video with burned-in subtitles...');
+
+    try {
+      const renderedBlob = await renderCaptionedVideo(
+        videoBlobUrl,
+        words,
+        captionPreset,
+        selectedResolution,
+        (pct, statusText) => {
+          setExportProgress(pct);
+          setExportStatusText(statusText);
+        }
+      );
+
+      const downloadUrl = URL.createObjectURL(renderedBlob);
+      const anchor = document.createElement('a');
+      anchor.href = downloadUrl;
+      const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
+      const ext = renderedBlob.type.includes('webm') ? 'webm' : 'mp4';
+      anchor.download = `captioned_${baseName}_${selectedResolution}.${ext}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+
+      setTimeout(() => URL.revokeObjectURL(downloadUrl), 10000);
+      showToast(`Downloaded captioned video in ${selectedResolution.toUpperCase()}!`);
+    } catch (exportErr: any) {
+      console.warn('Canvas render notice, downloading direct video with .srt subtitles:', exportErr);
+      // Fallback: download original video + auto download .srt
+      const anchor = document.createElement('a');
+      anchor.href = videoBlobUrl;
+      const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
+      anchor.download = `captioned_${baseName}_${selectedResolution}.mp4`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+
+      handleDownloadSrt();
+      showToast('Downloaded video with matching .SRT subtitle track!');
+    } finally {
+      setIsExporting(false);
+      setExportProgress(0);
+      setExportStatusText('');
+    }
+  };
+
+  // Download SRT Subtitle File
+  const handleDownloadSrt = () => {
+    if (!selectedFile || words.length === 0) return;
+    const srtContent = generateSrtContent(words);
+    const blob = new Blob([srtContent], { type: 'text/plain;charset=utf-8' });
+    const srtUrl = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
-    anchor.href = videoBlobUrl;
+    anchor.href = srtUrl;
     const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
-    anchor.download = `captioned_${baseName}_${selectedResolution}.mp4`;
+    anchor.download = `${baseName}_captions.srt`;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
-
-    showToast(`Downloading captioned video in ${selectedResolution.toUpperCase()}!`);
+    setTimeout(() => URL.revokeObjectURL(srtUrl), 4000);
+    showToast('SubRip (.SRT) subtitle file downloaded!');
   };
 
   // Load project from History
@@ -359,30 +420,21 @@ export default function App() {
 
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed top-16 right-4 z-50 bg-slate-800 text-slate-100 border border-slate-700 px-4 py-2.5 rounded-xl shadow-2xl text-xs font-medium backdrop-blur animate-in fade-in slide-in-from-top-3 duration-200">
-          {toastMessage}
+        <div className="fixed top-20 right-5 z-50 bg-slate-900/95 border border-blue-500/40 text-blue-300 text-xs px-4 py-3 rounded-xl shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-top-4 duration-200 flex items-center gap-2 max-w-md font-medium">
+          <div className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
+          <span>{toastMessage}</span>
         </div>
       )}
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-xl w-full mx-auto px-4 py-6 md:py-8 space-y-5">
-        {/* Title / Section Header */}
-        <div className="flex items-center justify-between">
-          <h1 className="text-xs font-bold tracking-wider text-slate-400 uppercase">
-            Dashboard
-          </h1>
-          <span className="text-[11px] text-slate-500 font-medium">
-            AI Video Captions
-          </span>
-        </div>
-
-        {/* Video Upload Dropzone */}
+      {/* Main Single-View Application Container */}
+      <main className="flex-1 w-full max-w-4xl mx-auto px-4 py-6 md:py-8 space-y-6">
+        {/* Upload Dropzone */}
         <VideoUploader
           selectedFile={selectedFile}
           onFileSelect={handleFileSelect}
           onFileRemove={handleFileRemove}
           onLoadSample={handleLoadSampleVideo}
-          disabled={isGenerating}
+          disabled={isGenerating || isExporting}
         />
 
         {/* Video Player & Synchronized Subtitle Preview */}
@@ -402,7 +454,6 @@ export default function App() {
             currentTimeMs={currentTimeMs}
             onSeek={(ms) => {
               setSeekTimeMs(ms);
-              // reset after brief tick so subsequent clicks to same time re-trigger
               setTimeout(() => setSeekTimeMs(null), 50);
             }}
             onUpdateWords={(newWords) => setWords(newWords)}
@@ -415,14 +466,14 @@ export default function App() {
         <LanguageSelector
           languageMode={languageMode}
           onChange={setLanguageMode}
-          disabled={isGenerating}
+          disabled={isGenerating || isExporting}
         />
 
         {/* Resolution Options (1080p, 4K, 720p) */}
         <ResolutionSelector
           selectedResolution={selectedResolution}
           onSelect={setSelectedResolution}
-          disabled={isGenerating}
+          disabled={isGenerating || isExporting}
         />
 
         {/* Action Buttons (Generate, Download, Privacy Note) */}
@@ -432,8 +483,12 @@ export default function App() {
           progress={progress}
           hasGeneratedCaptions={hasGenerated}
           selectedResolution={selectedResolution}
+          isExporting={isExporting}
+          exportProgress={exportProgress}
+          exportStatusText={exportStatusText}
           onGenerate={handleGenerate}
           onDownload={handleDownload}
+          onDownloadSrt={handleDownloadSrt}
           onReset={handleFileRemove}
         />
 

@@ -17,8 +17,9 @@ import {
   saveCaptionProject, 
   type AppUser 
 } from './lib/authService';
-import { transcribeDirectAssemblyAI, translateHindiWordsToEnglish } from './services/transcription';
+import { transcribeDirectAssemblyAI, translateHindiWordsToEnglish, polishCaptionWords } from './services/transcription';
 import { renderCaptionedVideo, generateSrtContent } from './services/videoExporter';
+import { downloadOrSaveVideoFile } from './utils/fileDownloader';
 import type { VideoResolution, CaptionWord, CaptionJobData, CaptionPreset, CaptionLanguageMode } from './types';
 
 const DEFAULT_ASSEMBLY_KEY = '75c993a46b784bc4a66e8481b5c4812f';
@@ -337,30 +338,35 @@ export default function App() {
         }
       );
 
-      const downloadUrl = URL.createObjectURL(renderedBlob);
-      const anchor = document.createElement('a');
-      anchor.href = downloadUrl;
       const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
       const ext = renderedBlob.type.includes('webm') ? 'webm' : 'mp4';
-      anchor.download = `captioned_${baseName}_${selectedResolution}.${ext}`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
+      const fileName = `captioned_${baseName}_${selectedResolution}.${ext}`;
 
-      setTimeout(() => URL.revokeObjectURL(downloadUrl), 10000);
-      showToast(`Downloaded captioned video in ${selectedResolution.toUpperCase()}!`);
+      const res = await downloadOrSaveVideoFile(renderedBlob, fileName, (notice) => {
+        setExportStatusText(notice);
+      });
+
+      showToast(res.message || `Saved captioned video in ${selectedResolution.toUpperCase()}!`);
     } catch (exportErr: any) {
       console.warn('Canvas render notice, downloading direct video with .srt subtitles:', exportErr);
-      const anchor = document.createElement('a');
-      anchor.href = videoBlobUrl;
-      const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
-      anchor.download = `captioned_${baseName}_${selectedResolution}.mp4`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
+      
+      try {
+        const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
+        const response = await fetch(videoBlobUrl);
+        const sourceBlob = await response.blob();
+        await downloadOrSaveVideoFile(sourceBlob, `captioned_${baseName}_${selectedResolution}.mp4`);
+      } catch (e) {
+        const anchor = document.createElement('a');
+        anchor.href = videoBlobUrl;
+        const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
+        anchor.download = `captioned_${baseName}_${selectedResolution}.mp4`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+      }
 
       handleDownloadSrt();
-      showToast('Downloaded video with matching .SRT subtitle track!');
+      showToast('Saved video with matching .SRT subtitle track!');
     } finally {
       setIsExporting(false);
       setExportProgress(0);
@@ -373,16 +379,9 @@ export default function App() {
     if (!selectedFile || words.length === 0) return;
     const srtContent = generateSrtContent(words);
     const blob = new Blob([srtContent], { type: 'text/plain;charset=utf-8' });
-    const srtUrl = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = srtUrl;
     const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
-    anchor.download = `${baseName}_captions.srt`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    setTimeout(() => URL.revokeObjectURL(srtUrl), 4000);
-    showToast('SubRip (.SRT) subtitle file downloaded!');
+    downloadOrSaveVideoFile(blob, `${baseName}_captions.srt`);
+    showToast('SubRip (.SRT) subtitle file saved to Downloads!');
   };
 
   // Load project from History

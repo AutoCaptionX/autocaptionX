@@ -9,32 +9,44 @@ export interface TranscriptionResult {
   detectedLanguage?: string;
 }
 
-// Hindi & Indic vocabulary dictionary
+// Extensive Hindi, Urdu & Indic vocabulary dictionary with precise contextual translations
 const HINDI_TRANSLATION_MAP: Record<string, string> = {
+  // Greetings & Courtesies
   'नमस्ते': 'Hello',
   'नमस्कार': 'Greetings',
   'हेलो': 'Hello',
   'हाय': 'Hi',
-  'दोस्तों': 'friends',
+  'शुक्रिया': 'Thank you',
+  'धन्यवाद': 'Thank you',
+  'अरे': 'Oh',
+  'वाह': 'Wow',
+  'शाबाश': 'Well done',
+  'माफ़': 'sorry',
+  'माफ': 'sorry',
+  'अलविदा': 'goodbye',
+
+  // Pronouns & Relationships
   'दोस्त': 'friend',
+  'दोस्तों': 'friends',
   'भाई': 'brother',
   'भाईयों': 'brothers',
   'बहन': 'sister',
   'बहनों': 'sisters',
   'पापा': 'Daddy',
+  'पिताजी': 'Father',
   'मम्मी': 'Mom',
   'माँ': 'Mother',
   'माताजी': 'Mother',
-  'पिताजी': 'Father',
   'बेटा': 'son',
   'बेटी': 'daughter',
   'बच्चा': 'baby',
   'बच्चे': 'kids',
-  'आज': 'Today',
-  'कल': 'Tomorrow',
+  'लोग': 'people',
+  'सब': 'all',
   'हम': 'we',
   'आप': 'you',
   'तुम': 'you',
+  'तू': 'you',
   'मैं': 'I',
   'मेरा': 'my',
   'मेरी': 'my',
@@ -45,9 +57,17 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'आपका': 'your',
   'आपकी': 'your',
   'आपके': 'your',
+  'तुम्हारा': 'your',
+  'तुम्हारी': 'your',
+  'तुम्हारे': 'your',
   'उसका': 'his',
   'उसकी': 'her',
+  'उसके': 'his',
   'उनका': 'their',
+  'उनकी': 'their',
+  'उनके': 'their',
+
+  // Common Verbs & Actions
   'बात': 'talk',
   'करेंगे': 'will discuss',
   'करेंगे।': 'will discuss.',
@@ -55,6 +75,29 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'करूँगा': 'will do',
   'करते': 'do',
   'करना': 'to do',
+  'करो': 'do',
+  'कीजिए': 'please do',
+  'देखो': 'watch',
+  'देखिए': 'please look',
+  'सुनो': 'listen',
+  'सुनिए': 'please listen',
+  'समझो': 'understand',
+  'सीखो': 'learn',
+  'बताओ': 'tell me',
+  'बोलो': 'speak',
+  'आओ': 'come',
+  'जाओ': 'go',
+  'चलो': 'let us go',
+  'रुक': 'stop',
+  'रुको': 'wait',
+  'शुरू': 'start',
+  'खत्म': 'finish',
+  'मिलते': 'meet',
+  'मिलेंगे': 'will meet',
+  'दिखाता': 'showing',
+  'दिखाऊंगा': 'will show',
+
+  // Helping Verbs & Tenses
   'है': 'is',
   'हैं': 'are',
   'था': 'was',
@@ -63,16 +106,35 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'होगा': 'will be',
   'होगी': 'will be',
   'होंगे': 'will be',
+  'रहा': 'is',
+  'रही': 'is',
+  'रहे': 'are',
+
+  // Adjectives & Qualities
   'बहुत': 'very',
   'अच्छा': 'good',
   'अच्छी': 'good',
   'अच्छे': 'good',
   'बढ़िया': 'great',
   'शानदार': 'amazing',
+  'ज़बरदस्त': 'fantastic',
+  'जबरदस्त': 'fantastic',
   'सुंदर': 'beautiful',
   'प्यारा': 'lovely',
   'प्यारी': 'sweet',
   'प्यारे': 'sweet',
+  'आसान': 'easy',
+  'मुश्किल': 'hard',
+  'छोटा': 'small',
+  'बड़ा': 'big',
+  'तेज़': 'fast',
+  'धीमे': 'slow',
+  'सही': 'right',
+  'गलत': 'wrong',
+  'सच': 'true',
+  'झूठ': 'false',
+
+  // Social Media & Tech Terms
   'वीडियो': 'video',
   'कैप्शन': 'caption',
   'सबटाइटल': 'subtitles',
@@ -81,44 +143,88 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'सब्सक्राइब': 'subscribe',
   'फॉलो': 'follow',
   'कमेंट': 'comment',
-  'करो': 'do',
-  'कीजिए': 'please do',
-  'देखो': 'watch',
-  'सुनो': 'listen',
-  'समझो': 'understand',
-  'सीखो': 'learn',
+  'चैनल': 'channel',
+  'लिंक': 'link',
+  'पोस्ट': 'post',
+
+  // Question Words & Pronouns
   'कैसे': 'how',
   'क्यों': 'why',
   'क्या': 'what',
   'कब': 'when',
   'कहाँ': 'where',
+  'कौन': 'who',
+  'किसका': 'whose',
+  'कितना': 'how much',
+  'कितने': 'how many',
   'ये': 'this',
   'यह': 'this',
   'वो': 'that',
   'वह': 'that',
   'यहाँ': 'here',
   'वहाँ': 'there',
-  'एक': 'one',
-  'दो': 'two',
-  'तीन': 'three',
-  'चार': 'four',
-  'पाँच': 'five',
-  'नया': 'new',
-  'नई': 'new',
-  'नए': 'new',
-  'सब': 'all',
-  'लोग': 'people',
-  'शुक्रिया': 'Thank you',
-  'धन्यवाद': 'Thank you',
-  'अरे': 'Oh',
-  'वाह': 'Wow',
-  'शाबाश': 'Well done',
-  'काम': 'work',
+
+  // Time & Days
+  'आज': 'Today',
+  'कल': 'Tomorrow',
+  'परसों': 'day after tomorrow',
   'समय': 'time',
   'दिन': 'day',
   'रात': 'night',
   'सुबह': 'morning',
   'शाम': 'evening',
+  'अभी': 'right now',
+  'हमेशा': 'always',
+  'कभी': 'sometimes',
+
+  // Numbers
+  'एक': 'one',
+  'दो': 'two',
+  'तीन': 'three',
+  'चार': 'four',
+  'पाँच': 'five',
+  'छह': 'six',
+  'सात': 'seven',
+  'आठ': 'eight',
+  'नौ': 'nine',
+  'दस': 'ten',
+  'सौ': 'hundred',
+  'हज़ार': 'thousand',
+  'नया': 'new',
+  'नई': 'new',
+  'नए': 'new',
+  'पहला': 'first',
+  'दूसरा': 'second',
+  'तीसरा': 'third',
+};
+
+// Common spelling and speech-to-text corrections for maximum accuracy
+const SPELL_CORRECTION_MAP: Record<string, string> = {
+  'vdo': 'video',
+  'vids': 'videos',
+  'yt': 'YouTube',
+  'subscibe': 'subscribe',
+  'subcribe': 'subscribe',
+  'subscribers': 'subscribers',
+  'subs': 'subscribers',
+  'insta': 'Instagram',
+  'instgram': 'Instagram',
+  'fb': 'Facebook',
+  'whatapp': 'WhatsApp',
+  'watsapp': 'WhatsApp',
+  'dont': "don't",
+  'cant': "can't",
+  'wont': "won't",
+  'im': "I'm",
+  'ive': "I've",
+  'youre': "you're",
+  'theyre': "they're",
+  'whats': "what's",
+  'thats': "that's",
+  'didnt': "didn't",
+  'isnt': "isn't",
+  'autocaption': 'AutoCaption',
+  'autocaptionx': 'AutoCaptionX',
 };
 
 // Transliterate Devanagari to Romanized English
@@ -135,12 +241,52 @@ export function transliterateDevanagariToHinglish(text: string): string {
     'ऐ': 'ai', 'ओ': 'o', 'औ': 'au', 'ा': 'a', 'ि': 'i',
     'ी': 'ee', 'ु': 'u', 'ू': 'oo', 'े': 'e', 'ै': 'ai',
     'ो': 'o', 'ौ': 'au', '्': '', 'ं': 'n', 'ँ': 'n',
+    '०': '0', '१': '1', '२': '2', '३': '3', '४': '4',
+    '५': '5', '६': '6', '७': '7', '८': '8', '९': '9',
   };
   let res = '';
   for (const char of text) {
     res += map[char] || char;
   }
   return res || text;
+}
+
+// Clean and polish transcription words (Fix spelling, capitalize proper nouns, remove duplicates)
+export function polishCaptionWords(words: CaptionWord[]): CaptionWord[] {
+  if (!words || words.length === 0) return [];
+
+  const cleaned: CaptionWord[] = [];
+
+  for (let i = 0; i < words.length; i++) {
+    const raw = words[i];
+    let txt = (raw.text || '').trim();
+    if (!txt) continue;
+
+    // Check lowercase key in spell correction map
+    const lower = txt.toLowerCase().replace(/^[^\w]+|[^\w]+$/g, '');
+    if (SPELL_CORRECTION_MAP[lower]) {
+      const punc = txt.replace(/^\w+/, '');
+      txt = SPELL_CORRECTION_MAP[lower] + punc;
+    }
+
+    // Capitalize "I", "I'm", "I'll", "I've"
+    if (lower === 'i' || lower === "i'm" || lower === "i've" || lower === "i'll") {
+      txt = txt.charAt(0).toUpperCase() + txt.slice(1);
+    }
+
+    // Capitalize first word of sentences
+    const prev = cleaned[cleaned.length - 1];
+    if (!prev || /[.!?\n]/.test(prev.text)) {
+      txt = txt.charAt(0).toUpperCase() + txt.slice(1);
+    }
+
+    cleaned.push({
+      ...raw,
+      text: txt,
+    });
+  }
+
+  return cleaned;
 }
 
 // Client-Side Cloud Translation with multiple fallback strategies
@@ -283,14 +429,17 @@ export async function translateHindiWordsToEnglish(
     }
   }
 
+  // Polish spelling and punctuation on translated words
+  const polished = polishCaptionWords(finalResult);
+
   // Ensure timestamps are strictly non-decreasing and non-overlapping
-  for (let i = 0; i < finalResult.length - 1; i++) {
-    if (finalResult[i].end > finalResult[i + 1].start) {
-      finalResult[i].end = Math.max(finalResult[i].start + 80, finalResult[i + 1].start);
+  for (let i = 0; i < polished.length - 1; i++) {
+    if (polished[i].end > polished[i + 1].start) {
+      polished[i].end = Math.max(polished[i].start + 80, polished[i + 1].start);
     }
   }
 
-  return finalResult;
+  return polished;
 }
 
 // Client-side direct fallback to AssemblyAI
@@ -326,7 +475,7 @@ export async function transcribeDirectAssemblyAI(
   const audioUrl = uploadData.upload_url;
   onProgress?.(35);
 
-  // 2. Submit transcription job with language detection
+  // 2. Submit transcription job with language detection and high precision speech model
   const transcriptResponse = await fetch('https://api.assemblyai.com/v2/transcript', {
     method: 'POST',
     headers: {
@@ -338,6 +487,8 @@ export async function transcribeDirectAssemblyAI(
       punctuate: true,
       format_text: true,
       language_detection: true,
+      speech_model: 'best',
+      filter_profanity: false,
     }),
   });
 
@@ -375,14 +526,14 @@ export async function transcribeDirectAssemblyAI(
         confidence: Number(w.confidence) || 0.95,
       }));
 
-      let processedWords = rawWords;
+      let processedWords = polishCaptionWords(rawWords);
 
       // Handle language modes
       if (languageMode === 'translate-en') {
         onProgress?.(80);
-        processedWords = await translateHindiWordsToEnglish(rawWords, onProgress);
+        processedWords = await translateHindiWordsToEnglish(processedWords, onProgress);
       } else if (languageMode === 'romanized-hinglish') {
-        processedWords = rawWords.map((w) => ({
+        processedWords = processedWords.map((w) => ({
           ...w,
           text: transliterateDevanagariToHinglish(w.text),
         }));

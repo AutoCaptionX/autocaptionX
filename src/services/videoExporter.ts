@@ -8,6 +8,7 @@ export interface RenderProgressCallback {
 export function generateSrtContent(words: CaptionWord[]): string {
   if (!words || words.length === 0) return '';
 
+  const sortedWords = [...words].sort((a, b) => a.start - b.start);
   const phrases: Array<{ words: CaptionWord[]; start: number; end: number }> = [];
   let current: CaptionWord[] = [];
 
@@ -21,7 +22,7 @@ export function generateSrtContent(words: CaptionWord[]): string {
     current = [];
   };
 
-  for (const w of words) {
+  for (const w of sortedWords) {
     const prev = current[current.length - 1];
     if (current.length >= 4 || (prev && w.start - prev.end > 500)) {
       flush();
@@ -46,7 +47,31 @@ export function generateSrtContent(words: CaptionWord[]): string {
     .join('\n');
 }
 
-// Export Burned-In Captioned Video using Offscreen Video + Canvas Drawing + MediaRecorder
+// Helper to determine exact finite duration of any video blob or source
+async function getAccurateVideoDuration(video: HTMLVideoElement): Promise<number> {
+  if (video.duration && !isNaN(video.duration) && video.duration !== Infinity && video.duration > 0.1) {
+    return video.duration;
+  }
+
+  return new Promise<number>((resolve) => {
+    const handleSeeked = () => {
+      video.removeEventListener('seeked', handleSeeked);
+      const accurateDur = video.duration && !isNaN(video.duration) && video.duration !== Infinity
+        ? video.duration
+        : video.currentTime > 0
+        ? video.currentTime
+        : 10;
+      video.currentTime = 0;
+      resolve(accurateDur);
+    };
+
+    video.addEventListener('seeked', handleSeeked, { once: true });
+    // Seek to a large number to force browser to calculate true duration for webm/mp4 blobs
+    video.currentTime = 1e6;
+  });
+}
+
+// Export 100% Full-Length Burned-In Captioned Video
 export async function renderCaptionedVideo(
   videoSourceUrl: string,
   words: CaptionWord[],
@@ -55,25 +80,58 @@ export async function renderCaptionedVideo(
   onProgress?: RenderProgressCallback
 ): Promise<Blob> {
   return new Promise(async (resolve, reject) => {
-    try {
-      onProgress?.(5, 'Preparing video and subtitle render engine...');
+    // Sandbox container to keep media pipeline active & unthrottled in browser
+    let sandboxContainer: HTMLDivElement | null = null;
+    let animId: number | null = null;
+    let checkIntervalId: any = null;
+    let audioCtx: AudioContext | null = null;
 
-      // 1. Create offscreen video element
+    const cleanup = () => {
+      if (animId) cancelAnimationFrame(animId);
+      if (checkIntervalId) clearInterval(checkIntervalId);
+      if (audioCtx && audioCtx.state !== 'closed') {
+        try {
+          audioCtx.close();
+        } catch (e) {}
+      }
+      if (sandboxContainer && sandboxContainer.parentNode) {
+        sandboxContainer.parentNode.removeChild(sandboxContainer);
+      }
+    };
+
+    try {
+      onProgress?.(5, 'Initializing high-fidelity render engine...');
+
+      sandboxContainer = document.createElement('div');
+      sandboxContainer.style.position = 'fixed';
+      sandboxContainer.style.top = '-9999px';
+      sandboxContainer.style.left = '-9999px';
+      sandboxContainer.style.opacity = '0';
+      sandboxContainer.style.pointerEvents = 'none';
+      sandboxContainer.style.zIndex = '-9999';
+      document.body.appendChild(sandboxContainer);
+
+      // 1. Create video element in sandbox
       const video = document.createElement('video');
       video.src = videoSourceUrl;
       video.crossOrigin = 'anonymous';
       video.playsInline = true;
       video.muted = false;
+      video.preload = 'auto';
+      sandboxContainer.appendChild(video);
 
       await new Promise<void>((res, rej) => {
         const onLoaded = () => {
-          video.removeEventListener('loadeddata', onLoaded);
+          video.removeEventListener('loadedmetadata', onLoaded);
           res();
         };
-        video.addEventListener('loadeddata', onLoaded);
-        video.onerror = () => rej(new Error('Failed to load video file for processing'));
-        if (video.readyState >= 2) res();
+        video.addEventListener('loadedmetadata', onLoaded);
+        video.onerror = () => rej(new Error('Unable to read video stream for rendering'));
+        if (video.readyState >= 1) res();
       });
+
+      // Calculate 100% accurate video duration
+      const totalVideoDuration = await getAccurateVideoDuration(video);
 
       // Target Dimensions based on aspect ratio
       const origWidth = video.videoWidth || 1080;
@@ -97,26 +155,25 @@ export async function renderCaptionedVideo(
       const canvas = document.createElement('canvas');
       canvas.width = targetWidth;
       canvas.height = targetHeight;
-      const ctx = canvas.getContext('2d', { alpha: false });
+      sandboxContainer.appendChild(canvas);
 
+      const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false });
       if (!ctx) {
-        throw new Error('Canvas 2D context is not supported in this browser');
+        throw new Error('Canvas 2D context is not available');
       }
 
       onProgress?.(12, 'Synthesizing subtitle layers...');
 
-      // 2. Setup Audio stream & Canvas Video stream
+      // 2. Setup audio routing
       const stream = canvas.captureStream(30);
 
-      // Attempt to attach original video audio track
       try {
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         if (AudioContextClass) {
-          const audioCtx = new AudioContextClass();
+          audioCtx = new AudioContextClass();
           const sourceNode = audioCtx.createMediaElementSource(video);
           const destNode = audioCtx.createMediaStreamDestination();
           sourceNode.connect(destNode);
-          sourceNode.connect(audioCtx.destination);
           const audioTracks = destNode.stream.getAudioTracks();
           if (audioTracks.length > 0) {
             stream.addTrack(audioTracks[0]);
@@ -132,7 +189,8 @@ export async function renderCaptionedVideo(
         } catch (e) {}
       }
 
-      // Group words into subtitle phrases for burn-in
+      // 3. Group words into subtitle chunks with chronological order
+      const sortedWords = [...words].sort((a, b) => a.start - b.start);
       const phrases: Array<{
         words: CaptionWord[];
         start: number;
@@ -154,11 +212,11 @@ export async function renderCaptionedVideo(
         currentGroup = [];
       };
 
-      for (let i = 0; i < words.length; i++) {
-        const w = words[i];
+      for (let i = 0; i < sortedWords.length; i++) {
+        const w = sortedWords[i];
         const prevW = currentGroup[currentGroup.length - 1];
         const hasPunct = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-        const isTimeGap = prevW && w.start - prevW.end > 500;
+        const isTimeGap = prevW && w.start - prevW.end > 450;
         const isMax = currentGroup.length >= 4;
 
         if (currentGroup.length > 0 && (hasPunct || isTimeGap || isMax)) {
@@ -184,7 +242,7 @@ export async function renderCaptionedVideo(
         }
       }
 
-      // 3. Setup MediaRecorder with best supported mimeType
+      // 4. Setup MediaRecorder with best supported mimeType
       const mimeTypes = [
         'video/mp4;codecs=avc1,mp4a.40.2',
         'video/mp4',
@@ -212,6 +270,21 @@ export async function renderCaptionedVideo(
         }
       };
 
+      let isCompleted = false;
+
+      const finishExport = () => {
+        if (isCompleted) return;
+        isCompleted = true;
+        cleanup();
+
+        try {
+          if (recorder.state === 'recording') {
+            recorder.requestData();
+            recorder.stop();
+          }
+        } catch (e) {}
+      };
+
       recorder.onstop = () => {
         const finalBlob = new Blob(recordedChunks, {
           type: selectedMimeType || 'video/mp4',
@@ -221,51 +294,66 @@ export async function renderCaptionedVideo(
       };
 
       recorder.onerror = (recErr) => {
+        cleanup();
         reject(recErr);
       };
 
-      // 4. Render & Record Loop
-      const videoDuration = video.duration && !isNaN(video.duration) ? video.duration : 1;
-      let animId: number;
-
+      // 5. High-Precision Render Loop
       const drawFrame = () => {
-        if (video.ended || video.currentTime >= videoDuration) {
-          cancelAnimationFrame(animId);
-          if (recorder.state === 'recording') {
-            recorder.stop();
+        if (isCompleted) return;
+
+        // Check if video has reached its real complete end
+        if (video.ended || (video.currentTime >= totalVideoDuration - 0.05 && video.currentTime > 0.5)) {
+          // Draw the absolute final frame
+          ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+          const curMs = Math.round(video.currentTime * 1000);
+          const currentPhrase = phrases.find((p) => curMs >= p.start && curMs <= p.displayUntil);
+          if (currentPhrase) {
+            renderSubtitlesOnCanvas(ctx, currentPhrase, curMs, preset, targetWidth, targetHeight);
           }
+
+          onProgress?.(99, 'Finalizing video stream...');
+          setTimeout(finishExport, 250);
           return;
         }
 
-        // Draw Current Video Frame
+        // Draw current video frame to canvas
         ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
 
-        // Find active subtitle and burn it into the canvas
-        const curMs = video.currentTime * 1000;
+        // Find active subtitle and burn it onto canvas
+        const curMs = Math.round(video.currentTime * 1000);
         const currentPhrase = phrases.find((p) => curMs >= p.start && curMs <= p.displayUntil);
-
         if (currentPhrase) {
           renderSubtitlesOnCanvas(ctx, currentPhrase, curMs, preset, targetWidth, targetHeight);
         }
 
-        const pct = Math.min(99, Math.round((video.currentTime / videoDuration) * 85) + 15);
-        onProgress?.(pct, `Burning captions into video... (${Math.round(video.currentTime)}s / ${Math.round(videoDuration)}s)`);
+        const pct = Math.min(98, Math.round((video.currentTime / Math.max(1, totalVideoDuration)) * 85) + 12);
+        onProgress?.(pct, `Burning captions into video... (${Math.round(video.currentTime)}s / ${Math.round(totalVideoDuration)}s)`);
 
         animId = requestAnimationFrame(drawFrame);
       };
 
+      // Start recording
       recorder.start(100);
       video.currentTime = 0;
+
+      video.onended = () => {
+        setTimeout(finishExport, 200);
+      };
+
       await video.play();
       animId = requestAnimationFrame(drawFrame);
 
-      video.onended = () => {
-        cancelAnimationFrame(animId);
-        if (recorder.state === 'recording') {
-          recorder.stop();
+      // Safety check interval to ensure rendering never stalls if RAF throttles
+      checkIntervalId = setInterval(() => {
+        if (isCompleted) return;
+        if (video.ended || (video.currentTime >= totalVideoDuration - 0.05 && video.currentTime > 0.5)) {
+          finishExport();
         }
-      };
+      }, 500);
+
     } catch (err) {
+      cleanup();
       reject(err);
     }
   });
@@ -320,93 +408,118 @@ function renderSubtitlesOnCanvas(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  // Measure word widths for accurate layout
-  const wordMetrics = phrase.words.map((w) => {
-    const isLatin = /^[A-Za-z0-9\s.,!?'"%-]+$/.test(w.text || '');
-    const displayText = (preset === 'hormozi' || preset === 'beast') && isLatin ? w.text.toUpperCase() : w.text;
-    return {
-      text: displayText,
-      width: ctx.measureText(displayText).width,
-    };
+  // Calculate total phrase line width
+  const wordMetrics = phrase.words.map((w, idx) => {
+    const text = w.text;
+    const isCurrent = idx === activeWordIdx;
+    const fontSize = isCurrent ? Math.round(baseFontSize * 1.15) : baseFontSize;
+    ctx.font = `900 ${fontSize}px ${fontFamily}`;
+    const textWidth = ctx.measureText(text).width;
+    return { text, textWidth, fontSize, isCurrent, idx };
   });
 
-  const spacing = baseFontSize * 0.32;
-  const totalWidth = wordMetrics.reduce((sum, m) => sum + m.width, 0) + (wordMetrics.length - 1) * spacing;
-  let startX = (width - totalWidth) / 2;
+  const spacing = isVertical ? Math.round(width * 0.02) : Math.round(width * 0.015);
+  const totalPhraseWidth =
+    wordMetrics.reduce((sum, item) => sum + item.textWidth, 0) + (wordMetrics.length - 1) * spacing;
 
-  // Draw semi-transparent pill backdrop for enhanced contrast
-  const padX = Math.round(baseFontSize * 0.7);
-  const padY = Math.round(baseFontSize * 0.45);
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+  // Draw Subtitle Background Pill
+  const paddingX = Math.round(baseFontSize * 0.9);
+  const paddingY = Math.round(baseFontSize * 0.55);
+  const pillWidth = totalPhraseWidth + paddingX * 2;
+  const pillHeight = baseFontSize * 1.8;
+  const pillX = (width - pillWidth) / 2;
+  const pillY = posY - pillHeight / 2;
+  const borderRadius = Math.round(baseFontSize * 0.4);
+
+  // Background Box
   ctx.beginPath();
-  if (typeof (ctx as any).roundRect === 'function') {
-    (ctx as any).roundRect(startX - padX, posY - baseFontSize / 2 - padY, totalWidth + padX * 2, baseFontSize + padY * 2, 18);
-  } else {
-    ctx.rect(startX - padX, posY - baseFontSize / 2 - padY, totalWidth + padX * 2, baseFontSize + padY * 2);
-  }
+  ctx.roundRect(pillX, pillY, pillWidth, pillHeight, borderRadius);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
   ctx.fill();
-  ctx.strokeStyle = preset === 'beast' ? '#10b981' : preset === 'neon' ? '#06b6d4' : 'rgba(255, 255, 255, 0.25)';
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = Math.max(1.5, Math.round(baseFontSize * 0.04));
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
   ctx.stroke();
 
-  // Draw each word inside the phrase
-  wordMetrics.forEach((m, idx) => {
-    const isCurrent = idx === activeWordIdx;
-    const isPast = idx < activeWordIdx;
-    const wordCenterX = startX + m.width / 2;
+  // Draw individual words with preset themes
+  let curX = (width - totalPhraseWidth) / 2;
 
-    ctx.save();
+  wordMetrics.forEach((w) => {
+    const wordCenterX = curX + w.textWidth / 2;
+    ctx.font = `900 ${w.fontSize}px ${fontFamily}`;
 
     if (preset === 'hormozi') {
-      // Alex Hormozi: High contrast yellow active highlight
-      ctx.lineWidth = Math.max(5, Math.round(baseFontSize * 0.14));
-      ctx.strokeStyle = '#000000';
-      ctx.strokeText(m.text, wordCenterX, posY);
+      if (w.isCurrent) {
+        // Glowing Active Box
+        const hlPaddingX = Math.round(w.fontSize * 0.25);
+        const hlPaddingY = Math.round(w.fontSize * 0.15);
+        const hlW = w.textWidth + hlPaddingX * 2;
+        const hlH = w.fontSize * 1.35;
+        const hlX = curX - hlPaddingX;
+        const hlY = posY - hlH / 2;
 
-      if (isCurrent) {
-        ctx.fillStyle = '#facc15'; // Vibrant Yellow
-      } else if (isPast) {
-        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.roundRect(hlX, hlY, hlW, hlH, Math.round(w.fontSize * 0.2));
+        ctx.fillStyle = 'rgba(234, 179, 8, 0.35)';
+        ctx.fill();
+
+        // Active Word (Bright Yellow)
+        ctx.fillStyle = '#fde047';
+        ctx.shadowColor = 'rgba(234, 179, 8, 0.8)';
+        ctx.shadowBlur = Math.round(w.fontSize * 0.3);
       } else {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
       }
-      ctx.fillText(m.text, wordCenterX, posY);
+      ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
+      ctx.strokeStyle = '#000000';
+      ctx.strokeText(w.text, wordCenterX, posY);
+      ctx.fillText(w.text, wordCenterX, posY);
+
     } else if (preset === 'neon') {
-      // Neon Glow Cyan
-      if (isCurrent) {
-        ctx.shadowColor = '#22d3ee';
-        ctx.shadowBlur = 20;
+      if (w.isCurrent) {
         ctx.fillStyle = '#67e8f9';
+        ctx.shadowColor = 'rgba(34, 211, 238, 0.95)';
+        ctx.shadowBlur = Math.round(w.fontSize * 0.4);
       } else {
         ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
       }
-      ctx.lineWidth = 4;
+      ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
       ctx.strokeStyle = '#000000';
-      ctx.strokeText(m.text, wordCenterX, posY);
-      ctx.fillText(m.text, wordCenterX, posY);
-    } else if (preset === 'beast') {
-      // MrBeast Vibrant Green
-      ctx.lineWidth = Math.max(5, Math.round(baseFontSize * 0.14));
-      ctx.strokeStyle = '#000000';
-      ctx.strokeText(m.text, wordCenterX, posY);
+      ctx.strokeText(w.text, wordCenterX, posY);
+      ctx.fillText(w.text, wordCenterX, posY);
 
-      if (isCurrent) {
-        ctx.fillStyle = '#34d399'; // Vibrant Green
+    } else if (preset === 'beast') {
+      if (w.isCurrent) {
+        ctx.fillStyle = '#4ade80';
+        ctx.shadowColor = 'rgba(74, 222, 128, 0.9)';
+        ctx.shadowBlur = Math.round(w.fontSize * 0.35);
+      } else {
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+      }
+      ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
+      ctx.strokeStyle = '#000000';
+      ctx.strokeText(w.text, wordCenterX, posY);
+      ctx.fillText(w.text, wordCenterX, posY);
+
+    } else {
+      // Clean Preset
+      if (w.isCurrent) {
+        ctx.fillStyle = '#38bdf8';
       } else {
         ctx.fillStyle = '#ffffff';
       }
-      ctx.fillText(m.text, wordCenterX, posY);
-    } else {
-      // Clean Subtitle
-      ctx.lineWidth = 4;
-      ctx.strokeStyle = 'rgba(0, 0, 0, 0.9)';
-      ctx.strokeText(m.text, wordCenterX, posY);
-      ctx.fillStyle = isCurrent ? '#38bdf8' : '#ffffff';
-      ctx.fillText(m.text, wordCenterX, posY);
+      ctx.lineWidth = Math.max(1.5, Math.round(w.fontSize * 0.05));
+      ctx.strokeStyle = '#000000';
+      ctx.strokeText(w.text, wordCenterX, posY);
+      ctx.fillText(w.text, wordCenterX, posY);
     }
 
-    ctx.restore();
-    startX += m.width + spacing;
+    curX += w.textWidth + spacing;
   });
 
   ctx.restore();

@@ -1,7 +1,12 @@
 // Audio extraction utility using Web Audio API to extract lightweight 16kHz WAV from video files
 export async function extractAudioFromMediaFile(file: File): Promise<{ blob: Blob; durationMs: number }> {
-  // If file is already a lightweight audio file (< 10MB audio), return it directly
-  if (file.type.startsWith('audio/') && file.size < 12 * 1024 * 1024) {
+  // If file is already a lightweight audio file (< 15MB audio), return it directly
+  if (file.type.startsWith('audio/') && file.size < 15 * 1024 * 1024) {
+    return { blob: file, durationMs: 0 };
+  }
+
+  // For very large files (> 80MB), avoid loading entire buffer in memory to prevent browser crash
+  if (file.size > 80 * 1024 * 1024) {
     return { blob: file, durationMs: 0 };
   }
 

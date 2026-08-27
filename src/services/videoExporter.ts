@@ -23,7 +23,7 @@ export function generateSrtContent(words: CaptionWord[]): string {
 
   for (const w of words) {
     const prev = current[current.length - 1];
-    if (current.length >= 5 || (prev && w.start - prev.end > 600)) {
+    if (current.length >= 4 || (prev && w.start - prev.end > 500)) {
       flush();
     }
     current.push(w);
@@ -41,7 +41,7 @@ export function generateSrtContent(words: CaptionWord[]): string {
   return phrases
     .map((p, idx) => {
       const lineText = p.words.map((w) => w.text).join(' ');
-      return `${idx + 1}\n${formatSrtTime(p.start)} --> ${formatSrtTime(p.end + 500)}\n${lineText}\n`;
+      return `${idx + 1}\n${formatSrtTime(p.start)} --> ${formatSrtTime(p.end + 250)}\n${lineText}\n`;
     })
     .join('\n');
 }
@@ -72,7 +72,6 @@ export async function renderCaptionedVideo(
         };
         video.addEventListener('loadeddata', onLoaded);
         video.onerror = () => rej(new Error('Failed to load video file for processing'));
-        // In case already loaded
         if (video.readyState >= 2) res();
       });
 
@@ -111,17 +110,20 @@ export async function renderCaptionedVideo(
 
       // Attempt to attach original video audio track
       try {
-        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const sourceNode = audioCtx.createMediaElementSource(video);
-        const destNode = audioCtx.createMediaStreamDestination();
-        sourceNode.connect(destNode);
-        sourceNode.connect(audioCtx.destination);
-        const audioTracks = destNode.stream.getAudioTracks();
-        if (audioTracks.length > 0) {
-          stream.addTrack(audioTracks[0]);
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioContextClass) {
+          const audioCtx = new AudioContextClass();
+          const sourceNode = audioCtx.createMediaElementSource(video);
+          const destNode = audioCtx.createMediaStreamDestination();
+          sourceNode.connect(destNode);
+          sourceNode.connect(audioCtx.destination);
+          const audioTracks = destNode.stream.getAudioTracks();
+          if (audioTracks.length > 0) {
+            stream.addTrack(audioTracks[0]);
+          }
         }
       } catch (audioErr) {
-        console.warn('Audio node capture fallback:', audioErr);
+        console.warn('Audio node capture notice:', audioErr);
         try {
           const directCapture = (video as any).captureStream ? (video as any).captureStream() : null;
           if (directCapture && directCapture.getAudioTracks().length > 0) {
@@ -147,7 +149,7 @@ export async function renderCaptionedVideo(
           words: [...currentGroup],
           start,
           end,
-          displayUntil: end + 1500,
+          displayUntil: end + 300,
         });
         currentGroup = [];
       };
@@ -156,7 +158,7 @@ export async function renderCaptionedVideo(
         const w = words[i];
         const prevW = currentGroup[currentGroup.length - 1];
         const hasPunct = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-        const isTimeGap = prevW && w.start - prevW.end > 700;
+        const isTimeGap = prevW && w.start - prevW.end > 500;
         const isMax = currentGroup.length >= 4;
 
         if (currentGroup.length > 0 && (hasPunct || isTimeGap || isMax)) {
@@ -169,13 +171,16 @@ export async function renderCaptionedVideo(
       for (let i = 0; i < phrases.length; i++) {
         const next = phrases[i + 1];
         if (next) {
-          if (next.start - phrases[i].end <= 2000) {
+          const gap = next.start - phrases[i].end;
+          if (gap <= 400 && gap > 0) {
             phrases[i].displayUntil = next.start;
+          } else if (gap <= 0) {
+            phrases[i].displayUntil = Math.max(phrases[i].end, next.start - 10);
           } else {
-            phrases[i].displayUntil = phrases[i].end + 1800;
+            phrases[i].displayUntil = phrases[i].end + 350;
           }
         } else {
-          phrases[i].displayUntil = phrases[i].end + 3000;
+          phrases[i].displayUntil = phrases[i].end + 600;
         }
       }
 
@@ -282,15 +287,26 @@ function renderSubtitlesOnCanvas(
   const posY = isVertical ? height * 0.78 : height * 0.82;
 
   // Active word index
-  let activeWordIdx = phrase.words.findIndex((w) => curMs >= w.start && curMs <= w.end);
-  if (activeWordIdx === -1) {
-    for (let i = phrase.words.length - 1; i >= 0; i--) {
-      if (curMs >= phrase.words[i].start) {
-        activeWordIdx = i;
-        break;
-      }
+  let activeWordIdx = -1;
+  for (let i = 0; i < phrase.words.length; i++) {
+    const w = phrase.words[i];
+    if (curMs >= w.start && curMs <= w.end) {
+      activeWordIdx = i;
+      break;
     }
-    if (activeWordIdx === -1) activeWordIdx = 0;
+  }
+  if (activeWordIdx === -1) {
+    if (curMs < phrase.words[0].start) {
+      activeWordIdx = 0;
+    } else {
+      for (let i = phrase.words.length - 1; i >= 0; i--) {
+        if (curMs >= phrase.words[i].start) {
+          activeWordIdx = i;
+          break;
+        }
+      }
+      if (activeWordIdx === -1) activeWordIdx = 0;
+    }
   }
 
   const fontFamily =
@@ -321,7 +337,7 @@ function renderSubtitlesOnCanvas(
   // Draw semi-transparent pill backdrop for enhanced contrast
   const padX = Math.round(baseFontSize * 0.7);
   const padY = Math.round(baseFontSize * 0.45);
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
   ctx.beginPath();
   if (typeof (ctx as any).roundRect === 'function') {
     (ctx as any).roundRect(startX - padX, posY - baseFontSize / 2 - padY, totalWidth + padX * 2, baseFontSize + padY * 2, 18);
@@ -329,7 +345,7 @@ function renderSubtitlesOnCanvas(
     ctx.rect(startX - padX, posY - baseFontSize / 2 - padY, totalWidth + padX * 2, baseFontSize + padY * 2);
   }
   ctx.fill();
-  ctx.strokeStyle = preset === 'beast' ? '#10b981' : preset === 'neon' ? '#06b6d4' : 'rgba(255, 255, 255, 0.2)';
+  ctx.strokeStyle = preset === 'beast' ? '#10b981' : preset === 'neon' ? '#06b6d4' : 'rgba(255, 255, 255, 0.25)';
   ctx.lineWidth = 2.5;
   ctx.stroke();
 

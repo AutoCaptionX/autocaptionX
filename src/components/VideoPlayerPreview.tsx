@@ -92,7 +92,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     };
   }, [videoUrl, onTimeUpdate]);
 
-  // Group words into natural subtitle chunks (3-5 words) covering full timeline
+  // Group words into natural subtitle chunks (3-4 words) with exact timing boundaries
   const phrases = React.useMemo(() => {
     if (!words || words.length === 0) return [];
 
@@ -115,7 +115,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         words: [...currentGroup],
         start,
         end,
-        displayUntil: end + 1500,
+        displayUntil: end + 300,
       });
       currentGroup = [];
     };
@@ -125,7 +125,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       const prevW = currentGroup[currentGroup.length - 1];
 
       const hasPunctuation = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-      const isTimeGap = prevW && w.start - prevW.end > 700;
+      const isTimeGap = prevW && w.start - prevW.end > 500;
       const isMaxWords = currentGroup.length >= 4;
 
       if (currentGroup.length > 0 && (hasPunctuation || isTimeGap || isMaxWords)) {
@@ -136,49 +136,61 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
     flushGroup();
 
-    // Ensure seamless handovers between phrases across full video duration
+    // Fine-tune display intervals to prevent overlaps and hide captions during long silences
     for (let i = 0; i < result.length; i++) {
       const nextPhrase = result[i + 1];
       if (nextPhrase) {
-        // If next phrase starts within 2 seconds, keep current phrase visible right until next phrase begins
-        if (nextPhrase.start - result[i].end <= 2000) {
+        const gap = nextPhrase.start - result[i].end;
+        if (gap <= 400 && gap > 0) {
           result[i].displayUntil = nextPhrase.start;
+        } else if (gap <= 0) {
+          result[i].displayUntil = Math.max(result[i].end, nextPhrase.start - 10);
         } else {
-          result[i].displayUntil = result[i].end + 1800;
+          // Normal pause in speech: hide caption cleanly after word finishes
+          result[i].displayUntil = result[i].end + 350;
         }
       } else {
-        // Last phrase stays visible for 3 seconds or until video ends
-        result[i].displayUntil = result[i].end + 3000;
+        result[i].displayUntil = result[i].end + 600;
       }
     }
 
     return result;
   }, [words]);
 
-  // Find the currently active phrase chunk and currently spoken word
+  // Find the currently active phrase chunk and accurately synchronized spoken word
   const activePhrase = React.useMemo(() => {
     if (!phrases || phrases.length === 0) return null;
 
-    // Direct active phrase match
+    // Active phrase match within audio window
     const current = phrases.find(
       (p) => currentTimeMs >= p.start && currentTimeMs <= p.displayUntil
     );
 
     if (current) {
-      let activeIdx = current.words.findIndex(
-        (w) => currentTimeMs >= w.start && currentTimeMs <= w.end
-      );
+      let activeIdx = -1;
 
-      // Micro gap handling: highlight the most recently spoken word
-      if (activeIdx === -1) {
-        for (let i = current.words.length - 1; i >= 0; i--) {
-          if (currentTimeMs >= current.words[i].start) {
-            activeIdx = i;
-            break;
-          }
+      // Exact word boundary check
+      for (let i = 0; i < current.words.length; i++) {
+        const w = current.words[i];
+        if (currentTimeMs >= w.start && currentTimeMs <= w.end) {
+          activeIdx = i;
+          break;
         }
-        // If before first word in phrase, highlight word 0
-        if (activeIdx === -1) activeIdx = 0;
+      }
+
+      // Smooth micro-gap handover: keep the closest previous word highlighted until next word starts
+      if (activeIdx === -1) {
+        if (currentTimeMs < current.words[0].start) {
+          activeIdx = 0;
+        } else {
+          for (let i = current.words.length - 1; i >= 0; i--) {
+            if (currentTimeMs >= current.words[i].start) {
+              activeIdx = i;
+              break;
+            }
+          }
+          if (activeIdx === -1) activeIdx = 0;
+        }
       }
 
       return {
@@ -187,20 +199,11 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       };
     }
 
-    // Fallback: If currentTime is before the very first phrase and video is paused
+    // Fallback: If video paused before first subtitle
     if (currentTimeMs < phrases[0].start && !isPlaying) {
       return {
         phrase: phrases[0],
         activeWordIdx: 0,
-      };
-    }
-
-    // Fallback: If video is past the last phrase but within 3 seconds
-    const lastPhrase = phrases[phrases.length - 1];
-    if (lastPhrase && currentTimeMs >= lastPhrase.start && currentTimeMs <= lastPhrase.displayUntil) {
-      return {
-        phrase: lastPhrase,
-        activeWordIdx: lastPhrase.words.length - 1,
       };
     }
 
@@ -298,7 +301,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
           {/* Synchronized Subtitles Overlay */}
           {activePhrase && activePhrase.phrase.words.length > 0 && !isGenerating && (
             <div className="absolute bottom-12 inset-x-0 flex justify-center px-4 pointer-events-none z-20">
-              <div className="bg-black/85 backdrop-blur-md px-5 py-3 rounded-2xl border border-white/20 shadow-[0_10px_35px_rgba(0,0,0,0.8)] flex items-center justify-center flex-wrap gap-2.5 text-center max-w-lg transition-all duration-150 animate-in fade-in zoom-in-95">
+              <div className="bg-black/85 backdrop-blur-md px-5 py-3 rounded-2xl border border-white/20 shadow-[0_10px_35px_rgba(0,0,0,0.8)] flex items-center justify-center flex-wrap gap-2.5 text-center max-w-lg transition-all duration-100 animate-in fade-in zoom-in-95">
                 {activePhrase.phrase.words.map((w, idx) => {
                   const isCurrent = idx === activePhrase.activeWordIdx;
                   const isPast = idx < activePhrase.activeWordIdx;

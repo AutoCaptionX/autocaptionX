@@ -56,7 +56,9 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     };
 
     const handleLoadedMetadata = () => {
-      setDurationMs(video.duration * 1000);
+      if (video.duration && !isNaN(video.duration)) {
+        setDurationMs(video.duration * 1000);
+      }
     };
 
     const handlePlay = () => {
@@ -69,10 +71,16 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       cancelAnimationFrame(animFrameId);
     };
 
+    const handleEnded = () => {
+      setIsPlaying(false);
+      cancelAnimationFrame(animFrameId);
+    };
+
     video.addEventListener('timeupdate', handleTimeUpdate);
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
+    video.addEventListener('ended', handleEnded);
 
     return () => {
       cancelAnimationFrame(animFrameId);
@@ -80,10 +88,11 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('pause', handlePause);
+      video.removeEventListener('ended', handleEnded);
     };
   }, [videoUrl, onTimeUpdate]);
 
-  // Group words into natural, readable subtitle phrases (3-5 words or punctuation/pause splits)
+  // Group words into natural subtitle chunks (3-5 words) covering full timeline
   const phrases = React.useMemo(() => {
     if (!words || words.length === 0) return [];
 
@@ -106,7 +115,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         words: [...currentGroup],
         start,
         end,
-        displayUntil: end + 2200, // Default display hold
+        displayUntil: end + 1500,
       });
       currentGroup = [];
     };
@@ -115,9 +124,8 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       const w = words[i];
       const prevW = currentGroup[currentGroup.length - 1];
 
-      // Check if we should break into a new phrase
       const hasPunctuation = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-      const isTimeGap = prevW && w.start - prevW.end > 650;
+      const isTimeGap = prevW && w.start - prevW.end > 700;
       const isMaxWords = currentGroup.length >= 4;
 
       if (currentGroup.length > 0 && (hasPunctuation || isTimeGap || isMaxWords)) {
@@ -128,46 +136,40 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
     flushGroup();
 
-    // Refine displayUntil: each phrase stays visible until the next phrase begins, or up to 2.8s after ending
+    // Ensure seamless handovers between phrases across full video duration
     for (let i = 0; i < result.length; i++) {
       const nextPhrase = result[i + 1];
       if (nextPhrase) {
-        // If next phrase starts shortly, hand over immediately at nextPhrase.start
-        // If there is a long pause (> 3s), hold for 2.8s then disappear until next phrase
-        result[i].displayUntil = Math.min(nextPhrase.start, result[i].end + 2800);
+        // If next phrase starts within 2 seconds, keep current phrase visible right until next phrase begins
+        if (nextPhrase.start - result[i].end <= 2000) {
+          result[i].displayUntil = nextPhrase.start;
+        } else {
+          result[i].displayUntil = result[i].end + 1800;
+        }
       } else {
-        // Last phrase holds for 3.5s after the final word
-        result[i].displayUntil = result[i].end + 3500;
+        // Last phrase stays visible for 3 seconds or until video ends
+        result[i].displayUntil = result[i].end + 3000;
       }
     }
 
     return result;
   }, [words]);
 
-  // Find the currently active phrase chunk
+  // Find the currently active phrase chunk and currently spoken word
   const activePhrase = React.useMemo(() => {
     if (!phrases || phrases.length === 0) return null;
 
-    // If video is at beginning or paused before first word, show the first phrase
-    if (currentTimeMs < phrases[0].start && !isPlaying) {
-      return {
-        phrase: phrases[0],
-        activeWordIdx: -1,
-      };
-    }
-
-    // Check matching active phrase
+    // Direct active phrase match
     const current = phrases.find(
       (p) => currentTimeMs >= p.start && currentTimeMs <= p.displayUntil
     );
 
     if (current) {
-      // Find active word inside current phrase
       let activeIdx = current.words.findIndex(
         (w) => currentTimeMs >= w.start && currentTimeMs <= w.end
       );
 
-      // If in a micro gap between words in the same phrase, keep the latest spoken word highlighted
+      // Micro gap handling: highlight the most recently spoken word
       if (activeIdx === -1) {
         for (let i = current.words.length - 1; i >= 0; i--) {
           if (currentTimeMs >= current.words[i].start) {
@@ -175,6 +177,8 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             break;
           }
         }
+        // If before first word in phrase, highlight word 0
+        if (activeIdx === -1) activeIdx = 0;
       }
 
       return {
@@ -183,7 +187,15 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       };
     }
 
-    // Check if we just finished the last phrase
+    // Fallback: If currentTime is before the very first phrase and video is paused
+    if (currentTimeMs < phrases[0].start && !isPlaying) {
+      return {
+        phrase: phrases[0],
+        activeWordIdx: 0,
+      };
+    }
+
+    // Fallback: If video is past the last phrase but within 3 seconds
     const lastPhrase = phrases[phrases.length - 1];
     if (lastPhrase && currentTimeMs >= lastPhrase.start && currentTimeMs <= lastPhrase.displayUntil) {
       return {
@@ -200,16 +212,16 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     switch (preset) {
       case 'neon':
         return isCurrent
-          ? 'text-emerald-300 scale-110 font-black px-2 py-0.5 bg-emerald-950/90 rounded-lg border border-emerald-400/90 shadow-[0_0_18px_rgba(52,211,153,0.9)]'
+          ? 'text-cyan-300 scale-110 font-black px-2 py-0.5 bg-cyan-950/90 rounded-lg border border-cyan-400/90 shadow-[0_0_18px_rgba(34,211,238,0.9)]'
           : isPast
-          ? 'text-emerald-100/90 font-bold'
+          ? 'text-white/95 font-bold'
           : 'text-slate-300/70 font-semibold';
       case 'beast':
         return isCurrent
-          ? 'text-red-500 scale-110 font-black px-2 py-0.5 bg-black/90 rounded-lg border border-red-500 shadow-[0_0_14px_rgba(239,68,68,0.85)]'
+          ? 'text-emerald-400 scale-110 font-black px-2 py-0.5 bg-black/90 rounded-lg border border-emerald-500 shadow-[0_0_14px_rgba(34,197,94,0.85)]'
           : isPast
           ? 'text-white font-bold'
-          : 'text-slate-400 font-semibold';
+          : 'text-slate-300 font-semibold';
       case 'clean':
         return isCurrent
           ? 'text-white scale-105 font-bold px-2 py-0.5 bg-blue-600 rounded-md shadow-md'
@@ -219,7 +231,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       case 'hormozi':
       default:
         return isCurrent
-          ? 'text-yellow-300 scale-115 font-black px-2 py-0.5 bg-yellow-500/25 rounded-md shadow-[0_2px_10px_rgba(234,179,8,0.4)]'
+          ? 'text-yellow-300 scale-115 font-black px-2.5 py-0.5 bg-yellow-500/25 rounded-md shadow-[0_2px_12px_rgba(234,179,8,0.5)]'
           : isPast
           ? 'text-white font-extrabold'
           : 'text-slate-200/80 font-bold';
@@ -256,7 +268,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             src={videoUrl}
             playsInline
             controls={false}
-            loop
+            loop={false}
             muted={isMuted}
             onClick={() => {
               if (videoRef.current) {
@@ -283,7 +295,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             </button>
           )}
 
-          {/* Subtitles Overlay */}
+          {/* Synchronized Subtitles Overlay */}
           {activePhrase && activePhrase.phrase.words.length > 0 && !isGenerating && (
             <div className="absolute bottom-12 inset-x-0 flex justify-center px-4 pointer-events-none z-20">
               <div className="bg-black/85 backdrop-blur-md px-5 py-3 rounded-2xl border border-white/20 shadow-[0_10px_35px_rgba(0,0,0,0.8)] flex items-center justify-center flex-wrap gap-2.5 text-center max-w-lg transition-all duration-150 animate-in fade-in zoom-in-95">
@@ -378,4 +390,3 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     </div>
   );
 };
-

@@ -9,7 +9,7 @@ export interface TranscriptionResult {
   detectedLanguage?: string;
 }
 
-// Extensive Hindi/Hinglish vocabulary dictionary
+// Hindi & Indic vocabulary dictionary
 const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'नमस्ते': 'Hello',
   'नमस्कार': 'Greetings',
@@ -24,6 +24,7 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'पापा': 'Daddy',
   'मम्मी': 'Mom',
   'माँ': 'Mother',
+  'माताजी': 'Mother',
   'पिताजी': 'Father',
   'बेटा': 'son',
   'बेटी': 'daughter',
@@ -120,7 +121,7 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'शाम': 'evening',
 };
 
-// Transliterate Devanagari to Romanized Hinglish
+// Transliterate Devanagari to Romanized English
 export function transliterateDevanagariToHinglish(text: string): string {
   const map: Record<string, string> = {
     'क': 'k', 'ख': 'kh', 'ग': 'g', 'घ': 'gh', 'ङ': 'ng',
@@ -187,7 +188,6 @@ async function translateTextToEnglish(text: string): Promise<string> {
     if (HINDI_TRANSLATION_MAP[stripped]) {
       return HINDI_TRANSLATION_MAP[stripped] + punctuation;
     }
-    // If Devanagari not in map, transliterate to romanized English
     if (/[\u0900-\u097F]/.test(stripped)) {
       const rom = transliterateDevanagariToHinglish(stripped);
       return (rom.charAt(0).toUpperCase() + rom.slice(1)) + punctuation;
@@ -198,14 +198,14 @@ async function translateTextToEnglish(text: string): Promise<string> {
   return translatedWords.join(' ');
 }
 
-// Proportionally maps translated English words across the full audio timeline
+// Proportionally maps translated English words across the entire video audio timeline
 export async function translateHindiWordsToEnglish(
   rawWords: CaptionWord[],
   onProgress?: (progress: number) => void
 ): Promise<CaptionWord[]> {
   if (!rawWords || rawWords.length === 0) return [];
 
-  // Group raw words into natural sentence/phrase chunks (~4-7 words or pauses)
+  // Group raw words into natural sentence/phrase chunks (~4-6 words or pauses)
   const chunks: Array<{ words: CaptionWord[]; start: number; end: number; rawText: string }> = [];
   let currentGroup: CaptionWord[] = [];
 
@@ -224,7 +224,7 @@ export async function translateHindiWordsToEnglish(
 
     const hasPunct = prev && /[.!?,\u0964|\n]/.test(prev.text);
     const hasTimeGap = prev && w.start - prev.end > 700;
-    const isMaxWords = currentGroup.length >= 6;
+    const isMaxWords = currentGroup.length >= 5;
 
     if (currentGroup.length > 0 && (hasPunct || hasTimeGap || isMaxWords)) {
       flush();
@@ -237,9 +237,9 @@ export async function translateHindiWordsToEnglish(
 
   for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
     const chunk = chunks[cIdx];
-    const duration = Math.max(300, chunk.end - chunk.start);
+    const duration = Math.max(350, chunk.end - chunk.start);
 
-    // Translate this segment to English
+    // Translate this segment to pure English
     let translatedSegmentText = chunk.rawText;
     try {
       translatedSegmentText = await translateTextToEnglish(chunk.rawText);
@@ -293,7 +293,7 @@ export async function translateHindiWordsToEnglish(
   return finalResult;
 }
 
-// Client-side direct fallback to AssemblyAI (when running on static hosts like GitHub Pages without Express backend)
+// Client-side direct fallback to AssemblyAI
 export async function transcribeDirectAssemblyAI(
   file: File,
   apiKey: string,
@@ -350,7 +350,7 @@ export async function transcribeDirectAssemblyAI(
   const transcriptId = transcriptData.id;
   onProgress?.(50);
 
-  // 3. Poll for completion (supports 30s to full length videos)
+  // 3. Poll for completion (supports full length video duration)
   let attempts = 0;
   const maxAttempts = 150;
 
@@ -380,7 +380,6 @@ export async function transcribeDirectAssemblyAI(
       // Handle language modes
       if (languageMode === 'translate-en') {
         onProgress?.(80);
-        // Translate Hindi / foreign words to English with full duration sync
         processedWords = await translateHindiWordsToEnglish(rawWords, onProgress);
       } else if (languageMode === 'romanized-hinglish') {
         processedWords = rawWords.map((w) => ({

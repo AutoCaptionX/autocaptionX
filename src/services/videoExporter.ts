@@ -8,7 +8,6 @@ export interface RenderProgressCallback {
 export function generateSrtContent(words: CaptionWord[]): string {
   if (!words || words.length === 0) return '';
 
-  // Group into subtitle lines (4-5 words or pauses)
   const phrases: Array<{ words: CaptionWord[]; start: number; end: number }> = [];
   let current: CaptionWord[] = [];
 
@@ -32,7 +31,6 @@ export function generateSrtContent(words: CaptionWord[]): string {
   flush();
 
   const formatSrtTime = (ms: number): string => {
-    const date = new Date(ms);
     const hours = Math.floor(ms / 3600000).toString().padStart(2, '0');
     const minutes = Math.floor((ms % 3600000) / 60000).toString().padStart(2, '0');
     const seconds = Math.floor((ms % 60000) / 1000).toString().padStart(2, '0');
@@ -48,7 +46,7 @@ export function generateSrtContent(words: CaptionWord[]): string {
     .join('\n');
 }
 
-// Export Burned-In Captioned Video using Canvas & MediaRecorder
+// Export Burned-In Captioned Video using Offscreen Video + Canvas Drawing + MediaRecorder
 export async function renderCaptionedVideo(
   videoSourceUrl: string,
   words: CaptionWord[],
@@ -58,7 +56,7 @@ export async function renderCaptionedVideo(
 ): Promise<Blob> {
   return new Promise(async (resolve, reject) => {
     try {
-      onProgress?.(5, 'Preparing video and subtitle layers...');
+      onProgress?.(5, 'Preparing video and subtitle render engine...');
 
       // 1. Create offscreen video element
       const video = document.createElement('video');
@@ -68,8 +66,14 @@ export async function renderCaptionedVideo(
       video.muted = false;
 
       await new Promise<void>((res, rej) => {
-        video.onloadedmetadata = () => res();
+        const onLoaded = () => {
+          video.removeEventListener('loadeddata', onLoaded);
+          res();
+        };
+        video.addEventListener('loadeddata', onLoaded);
         video.onerror = () => rej(new Error('Failed to load video file for processing'));
+        // In case already loaded
+        if (video.readyState >= 2) res();
       });
 
       // Target Dimensions based on aspect ratio
@@ -100,12 +104,12 @@ export async function renderCaptionedVideo(
         throw new Error('Canvas 2D context is not supported in this browser');
       }
 
-      onProgress?.(15, 'Binding video audio track...');
+      onProgress?.(12, 'Synthesizing subtitle layers...');
 
       // 2. Setup Audio stream & Canvas Video stream
       const stream = canvas.captureStream(30);
 
-      // Attempt to attach audio track
+      // Attempt to attach original video audio track
       try {
         const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
         const sourceNode = audioCtx.createMediaElementSource(video);
@@ -117,7 +121,7 @@ export async function renderCaptionedVideo(
           stream.addTrack(audioTracks[0]);
         }
       } catch (audioErr) {
-        console.warn('Audio capture note (silent or direct stream):', audioErr);
+        console.warn('Audio node capture fallback:', audioErr);
         try {
           const directCapture = (video as any).captureStream ? (video as any).captureStream() : null;
           if (directCapture && directCapture.getAudioTracks().length > 0) {
@@ -126,7 +130,7 @@ export async function renderCaptionedVideo(
         } catch (e) {}
       }
 
-      // Group words into phrases for rendering
+      // Group words into subtitle phrases for burn-in
       const phrases: Array<{
         words: CaptionWord[];
         start: number;
@@ -143,7 +147,7 @@ export async function renderCaptionedVideo(
           words: [...currentGroup],
           start,
           end,
-          displayUntil: end + 2500,
+          displayUntil: end + 1500,
         });
         currentGroup = [];
       };
@@ -152,7 +156,7 @@ export async function renderCaptionedVideo(
         const w = words[i];
         const prevW = currentGroup[currentGroup.length - 1];
         const hasPunct = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-        const isTimeGap = prevW && w.start - prevW.end > 650;
+        const isTimeGap = prevW && w.start - prevW.end > 700;
         const isMax = currentGroup.length >= 4;
 
         if (currentGroup.length > 0 && (hasPunct || isTimeGap || isMax)) {
@@ -165,9 +169,13 @@ export async function renderCaptionedVideo(
       for (let i = 0; i < phrases.length; i++) {
         const next = phrases[i + 1];
         if (next) {
-          phrases[i].displayUntil = Math.min(next.start, phrases[i].end + 2500);
+          if (next.start - phrases[i].end <= 2000) {
+            phrases[i].displayUntil = next.start;
+          } else {
+            phrases[i].displayUntil = phrases[i].end + 1800;
+          }
         } else {
-          phrases[i].displayUntil = phrases[i].end + 3500;
+          phrases[i].displayUntil = phrases[i].end + 3000;
         }
       }
 
@@ -211,21 +219,23 @@ export async function renderCaptionedVideo(
         reject(recErr);
       };
 
-      // Draw Loop
-      const videoDuration = video.duration || 1;
+      // 4. Render & Record Loop
+      const videoDuration = video.duration && !isNaN(video.duration) ? video.duration : 1;
       let animId: number;
 
       const drawFrame = () => {
         if (video.ended || video.currentTime >= videoDuration) {
           cancelAnimationFrame(animId);
-          recorder.stop();
+          if (recorder.state === 'recording') {
+            recorder.stop();
+          }
           return;
         }
 
-        // Draw Video Frame
+        // Draw Current Video Frame
         ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
 
-        // Find active subtitle
+        // Find active subtitle and burn it into the canvas
         const curMs = video.currentTime * 1000;
         const currentPhrase = phrases.find((p) => curMs >= p.start && curMs <= p.displayUntil);
 
@@ -233,13 +243,13 @@ export async function renderCaptionedVideo(
           renderSubtitlesOnCanvas(ctx, currentPhrase, curMs, preset, targetWidth, targetHeight);
         }
 
-        const pct = Math.min(99, Math.round((video.currentTime / videoDuration) * 90) + 10);
+        const pct = Math.min(99, Math.round((video.currentTime / videoDuration) * 85) + 15);
         onProgress?.(pct, `Burning captions into video... (${Math.round(video.currentTime)}s / ${Math.round(videoDuration)}s)`);
 
         animId = requestAnimationFrame(drawFrame);
       };
 
-      recorder.start(250);
+      recorder.start(100);
       video.currentTime = 0;
       await video.play();
       animId = requestAnimationFrame(drawFrame);
@@ -256,7 +266,7 @@ export async function renderCaptionedVideo(
   });
 }
 
-// Helper to draw styled subtitle presets onto canvas
+// Helper to draw styled subtitle presets directly onto the video canvas
 function renderSubtitlesOnCanvas(
   ctx: CanvasRenderingContext2D,
   phrase: { words: CaptionWord[]; start: number; end: number },
@@ -268,8 +278,8 @@ function renderSubtitlesOnCanvas(
   ctx.save();
 
   const isVertical = height > width;
-  const baseFontSize = isVertical ? Math.round(width * 0.065) : Math.round(height * 0.075);
-  const posY = isVertical ? height * 0.76 : height * 0.82;
+  const baseFontSize = isVertical ? Math.round(width * 0.062) : Math.round(height * 0.072);
+  const posY = isVertical ? height * 0.78 : height * 0.82;
 
   // Active word index
   let activeWordIdx = phrase.words.findIndex((w) => curMs >= w.start && curMs <= w.end);
@@ -280,11 +290,12 @@ function renderSubtitlesOnCanvas(
         break;
       }
     }
+    if (activeWordIdx === -1) activeWordIdx = 0;
   }
 
   const fontFamily =
     preset === 'hormozi'
-      ? 'Montserrat, Impact, sans-serif'
+      ? 'Montserrat, Impact, Arial, sans-serif'
       : preset === 'beast'
       ? 'Poppins, Arial Black, sans-serif'
       : 'Plus Jakarta Sans, sans-serif';
@@ -293,30 +304,36 @@ function renderSubtitlesOnCanvas(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  // Measure word widths for precise horizontal placement
-  const wordMetrics = phrase.words.map((w) => ({
-    text: preset === 'hormozi' || preset === 'beast' ? w.text.toUpperCase() : w.text,
-    width: ctx.measureText(preset === 'hormozi' || preset === 'beast' ? w.text.toUpperCase() : w.text).width,
-  }));
+  // Measure word widths for accurate layout
+  const wordMetrics = phrase.words.map((w) => {
+    const isLatin = /^[A-Za-z0-9\s.,!?'"%-]+$/.test(w.text || '');
+    const displayText = (preset === 'hormozi' || preset === 'beast') && isLatin ? w.text.toUpperCase() : w.text;
+    return {
+      text: displayText,
+      width: ctx.measureText(displayText).width,
+    };
+  });
 
-  const spacing = baseFontSize * 0.35;
+  const spacing = baseFontSize * 0.32;
   const totalWidth = wordMetrics.reduce((sum, m) => sum + m.width, 0) + (wordMetrics.length - 1) * spacing;
   let startX = (width - totalWidth) / 2;
 
-  // Render Backdrop Badge if Beast or Cyberpunk
-  if (preset === 'beast') {
-    const padX = 24;
-    const padY = 16;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
-    ctx.beginPath();
-    ctx.roundRect(startX - padX, posY - baseFontSize / 2 - padY, totalWidth + padX * 2, baseFontSize + padY * 2, 16);
-    ctx.fill();
-    ctx.strokeStyle = '#f59e0b';
-    ctx.lineWidth = 3;
-    ctx.stroke();
+  // Draw semi-transparent pill backdrop for enhanced contrast
+  const padX = Math.round(baseFontSize * 0.7);
+  const padY = Math.round(baseFontSize * 0.45);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
+  ctx.beginPath();
+  if (typeof (ctx as any).roundRect === 'function') {
+    (ctx as any).roundRect(startX - padX, posY - baseFontSize / 2 - padY, totalWidth + padX * 2, baseFontSize + padY * 2, 18);
+  } else {
+    ctx.rect(startX - padX, posY - baseFontSize / 2 - padY, totalWidth + padX * 2, baseFontSize + padY * 2);
   }
+  ctx.fill();
+  ctx.strokeStyle = preset === 'beast' ? '#10b981' : preset === 'neon' ? '#06b6d4' : 'rgba(255, 255, 255, 0.2)';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
 
-  // Draw each word
+  // Draw each word inside the phrase
   wordMetrics.forEach((m, idx) => {
     const isCurrent = idx === activeWordIdx;
     const isPast = idx < activeWordIdx;
@@ -325,8 +342,8 @@ function renderSubtitlesOnCanvas(
     ctx.save();
 
     if (preset === 'hormozi') {
-      // Alex Hormozi Style: High contrast, thick outline, bright yellow for active
-      ctx.lineWidth = Math.max(6, Math.round(baseFontSize * 0.18));
+      // Alex Hormozi: High contrast yellow active highlight
+      ctx.lineWidth = Math.max(5, Math.round(baseFontSize * 0.14));
       ctx.strokeStyle = '#000000';
       ctx.strokeText(m.text, wordCenterX, posY);
 
@@ -335,18 +352,16 @@ function renderSubtitlesOnCanvas(
       } else if (isPast) {
         ctx.fillStyle = '#ffffff';
       } else {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
       }
       ctx.fillText(m.text, wordCenterX, posY);
     } else if (preset === 'neon') {
-      // Neon Glow
+      // Neon Glow Cyan
       if (isCurrent) {
-        ctx.shadowColor = '#06b6d4';
-        ctx.shadowBlur = 24;
-        ctx.fillStyle = '#22d3ee';
+        ctx.shadowColor = '#22d3ee';
+        ctx.shadowBlur = 20;
+        ctx.fillStyle = '#67e8f9';
       } else {
-        ctx.shadowColor = 'rgba(0,0,0,0.8)';
-        ctx.shadowBlur = 8;
         ctx.fillStyle = '#ffffff';
       }
       ctx.lineWidth = 4;
@@ -354,19 +369,19 @@ function renderSubtitlesOnCanvas(
       ctx.strokeText(m.text, wordCenterX, posY);
       ctx.fillText(m.text, wordCenterX, posY);
     } else if (preset === 'beast') {
-      // MrBeast Style
-      ctx.lineWidth = Math.max(5, Math.round(baseFontSize * 0.15));
+      // MrBeast Vibrant Green
+      ctx.lineWidth = Math.max(5, Math.round(baseFontSize * 0.14));
       ctx.strokeStyle = '#000000';
       ctx.strokeText(m.text, wordCenterX, posY);
 
       if (isCurrent) {
-        ctx.fillStyle = '#22c55e'; // Bright Green
+        ctx.fillStyle = '#34d399'; // Vibrant Green
       } else {
         ctx.fillStyle = '#ffffff';
       }
       ctx.fillText(m.text, wordCenterX, posY);
     } else {
-      // Minimal / Clean Subtitles
+      // Clean Subtitle
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(0, 0, 0, 0.9)';
       ctx.strokeText(m.text, wordCenterX, posY);

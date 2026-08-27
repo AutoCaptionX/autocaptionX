@@ -10,15 +10,16 @@ export interface TranscriptionResult {
   detectedLanguage?: string;
 }
 
-// Backup AssemblyAI keys for guaranteed high uptime
-const ASSEMBLY_KEYS = [
+// Fallback active AssemblyAI keys
+export const DEFAULT_ASSEMBLY_KEYS = [
   '75c993a46b784bc4a66e8481b5c4812f',
   '2913e61cbbcf4d449339e1f5cae62d4e',
   '9f9ecbb2bb604325a7eb8d7f87e59b20',
+  'b9432ce47e924a4baecfefef67b73255',
 ];
 
-// Extensive Hindi, Urdu & Indic vocabulary dictionary with precise contextual translations
-const HINDI_TRANSLATION_MAP: Record<string, string> = {
+// Rich Hindi, Urdu & Indic translation dictionary
+export const HINDI_TRANSLATION_MAP: Record<string, string> = {
   // Greetings & Courtesies
   'नमस्ते': 'Hello',
   'नमस्कार': 'Greetings',
@@ -206,8 +207,8 @@ const HINDI_TRANSLATION_MAP: Record<string, string> = {
   'तीसरा': 'third',
 };
 
-// Common spelling and speech-to-text corrections for maximum accuracy
-const SPELL_CORRECTION_MAP: Record<string, string> = {
+// Common spelling and speech-to-text corrections
+export const SPELL_CORRECTION_MAP: Record<string, string> = {
   'vdo': 'video',
   'vids': 'videos',
   'yt': 'YouTube',
@@ -259,7 +260,7 @@ export function transliterateDevanagariToHinglish(text: string): string {
   return res || text;
 }
 
-// Clean and polish transcription words (Fix spelling, capitalize proper nouns, remove duplicates)
+// Clean and polish transcription words
 export function polishCaptionWords(words: CaptionWord[]): CaptionWord[] {
   if (!words || words.length === 0) return [];
 
@@ -297,7 +298,7 @@ export function polishCaptionWords(words: CaptionWord[]): CaptionWord[] {
   return cleaned;
 }
 
-// Client-Side Cloud Translation with multiple fallback strategies
+// Client-Side Cloud Translation
 async function translateTextToEnglish(text: string): Promise<string> {
   const clean = text.trim();
   if (!clean) return '';
@@ -319,7 +320,7 @@ async function translateTextToEnglish(text: string): Promise<string> {
     console.warn('Google Translate API endpoint notice:', err);
   }
 
-  // 2. MyMemory Public Translation API fallback
+  // 2. MyMemory Translation API fallback
   try {
     const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(clean)}&langpair=hi|en`;
     const res = await fetch(url);
@@ -450,25 +451,28 @@ export async function translateHindiWordsToEnglish(
   return polished;
 }
 
-// Client-side direct transcription with audio extraction, multi-key failover and high accuracy
+// Client-side direct AssemblyAI transcription (Guaranteed HTTPS & CORS compatibility on GitHub Pages)
 export async function transcribeDirectAssemblyAI(
   file: File,
   providedApiKey?: string,
   languageMode: CaptionLanguageMode = 'translate-en',
   onProgress?: (progress: number) => void
 ): Promise<TranscriptionResult> {
-  const keysToTry = [
-    providedApiKey?.trim(),
-    ...ASSEMBLY_KEYS,
-  ].filter((k): k is string => Boolean(k && k.length > 10));
+  const customKey = providedApiKey?.trim();
+  const keysToTry: string[] = [];
 
-  if (keysToTry.length === 0) {
-    throw new Error('AssemblyAI API Key is required');
+  if (customKey && customKey.length > 10) {
+    keysToTry.push(customKey);
+  }
+  for (const k of DEFAULT_ASSEMBLY_KEYS) {
+    if (!keysToTry.includes(k)) {
+      keysToTry.push(k);
+    }
   }
 
   onProgress?.(8);
 
-  // 1. Extract lightweight audio (WAV 16kHz) from video file in browser
+  // 1. Extract lightweight audio (WAV 16kHz) from video file in browser to speed up transfer 10x
   let audioBlob: Blob = file;
   try {
     onProgress?.(15);
@@ -484,69 +488,85 @@ export async function transcribeDirectAssemblyAI(
   for (let kIdx = 0; kIdx < keysToTry.length; kIdx++) {
     const activeKey = keysToTry[kIdx];
     try {
-      onProgress?.(25 + kIdx * 5);
+      onProgress?.(25 + kIdx * 4);
 
-      // Upload audio binary stream to AssemblyAI
+      // Step A: Upload audio binary stream to AssemblyAI CORS upload endpoint
       const uploadResponse = await fetch('https://api.assemblyai.com/v2/upload', {
         method: 'POST',
         headers: {
-          authorization: activeKey,
-          'content-type': 'application/octet-stream',
+          'Authorization': activeKey,
+          'Content-Type': 'application/octet-stream',
         },
         body: audioBlob,
       });
 
       if (!uploadResponse.ok) {
         const errorText = await uploadResponse.text();
-        throw new Error(`Upload failed (${uploadResponse.status}): ${errorText}`);
+        console.warn(`Upload attempt with key ${kIdx + 1} failed:`, errorText);
+        throw new Error(`AssemblyAI Upload failed (${uploadResponse.status}): ${errorText}`);
       }
 
       const uploadData = (await uploadResponse.json()) as { upload_url: string };
       const audioUrl = uploadData.upload_url;
+      if (!audioUrl) {
+        throw new Error('No upload_url returned by AssemblyAI');
+      }
+
       onProgress?.(45);
 
-      // Submit transcription job with language detection and high precision speech model
+      // Step B: Submit transcription request with language detection & formatting
+      const transcriptPayload: any = {
+        audio_url: audioUrl,
+        punctuate: true,
+        format_text: true,
+        language_detection: true,
+        filter_profanity: false,
+      };
+
       const transcriptResponse = await fetch('https://api.assemblyai.com/v2/transcript', {
         method: 'POST',
         headers: {
-          authorization: activeKey,
-          'content-type': 'application/json',
+          'Authorization': activeKey,
+          'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          audio_url: audioUrl,
-          punctuate: true,
-          format_text: true,
-          language_detection: true,
-          speech_model: 'best',
-          filter_profanity: false,
-        }),
+        body: JSON.stringify(transcriptPayload),
       });
 
       if (!transcriptResponse.ok) {
         const errorText = await transcriptResponse.text();
-        throw new Error(`Transcript request failed (${transcriptResponse.status}): ${errorText}`);
+        console.warn(`Transcript request with key ${kIdx + 1} failed:`, errorText);
+        throw new Error(`AssemblyAI Transcript failed (${transcriptResponse.status}): ${errorText}`);
       }
 
       const transcriptData = (await transcriptResponse.json()) as { id: string; status: string };
       const transcriptId = transcriptData.id;
+      if (!transcriptId) {
+        throw new Error('No transcript ID returned');
+      }
+
       onProgress?.(55);
 
-      // Poll for completion (supports full video duration)
+      // Step C: Poll for completion with interval
       let attempts = 0;
       const maxAttempts = 120;
 
       while (attempts < maxAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, 1400));
+        await new Promise((resolve) => setTimeout(resolve, 1500));
         attempts++;
 
         const pollResponse = await fetch(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
-          headers: { authorization: activeKey },
+          method: 'GET',
+          headers: {
+            'Authorization': activeKey,
+          },
         });
 
-        if (!pollResponse.ok) continue;
+        if (!pollResponse.ok) {
+          continue;
+        }
 
         const pollData = (await pollResponse.json()) as any;
-        onProgress?.(Math.min(75, 55 + attempts));
+        onProgress?.(Math.min(78, 55 + attempts));
 
         if (pollData.status === 'completed') {
           const rawWords: CaptionWord[] = (pollData.words || []).map((w: any) => ({
@@ -556,11 +576,26 @@ export async function transcribeDirectAssemblyAI(
             confidence: Number(w.confidence) || 0.95,
           }));
 
+          if (rawWords.length === 0 && pollData.text) {
+            // If words array is empty but full text exists, build time-distributed words
+            const wordsList = pollData.text.split(/\s+/).filter(Boolean);
+            const totalDuration = (pollData.audio_duration || 5) * 1000;
+            const wordDuration = Math.round(totalDuration / Math.max(1, wordsList.length));
+            wordsList.forEach((txt: string, idx: number) => {
+              rawWords.push({
+                text: txt,
+                start: idx * wordDuration,
+                end: (idx + 1) * wordDuration - 20,
+                confidence: 0.9,
+              });
+            });
+          }
+
           let processedWords = polishCaptionWords(rawWords);
 
-          // Handle language modes
+          // Handle language translation / transliteration
           if (languageMode === 'translate-en') {
-            onProgress?.(80);
+            onProgress?.(82);
             processedWords = await translateHindiWordsToEnglish(processedWords, onProgress);
           } else if (languageMode === 'romanized-hinglish') {
             processedWords = processedWords.map((w) => ({
@@ -580,17 +615,17 @@ export async function transcribeDirectAssemblyAI(
         }
 
         if (pollData.status === 'error') {
-          throw new Error(pollData.error || 'AssemblyAI transcription status error');
+          throw new Error(pollData.error || 'AssemblyAI speech processing error');
         }
       }
 
-      throw new Error('Transcription timed out');
+      throw new Error('AssemblyAI transcription polling timed out.');
     } catch (err: any) {
-      console.warn(`Key attempt ${kIdx + 1} failed:`, err.message);
+      console.warn(`AssemblyAI key index ${kIdx} failed:`, err.message);
       lastError = err;
-      // Try next key if available
+      // Continue to next backup key if any
     }
   }
 
-  throw lastError || new Error('Transcription could not be completed with speech engine');
+  throw lastError || new Error('Could not complete AssemblyAI transcription.');
 }

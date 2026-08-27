@@ -18,6 +18,7 @@ import {
   type AppUser 
 } from './lib/authService';
 import { transcribeDirectAssemblyAI, translateHindiWordsToEnglish, polishCaptionWords } from './services/transcription';
+import { transcribeWithBrowserSpeech } from './services/browserSpeechTranscriber';
 import { renderCaptionedVideo, generateSrtContent } from './services/videoExporter';
 import { downloadOrSaveVideoFile } from './utils/fileDownloader';
 import type { VideoResolution, CaptionWord, CaptionJobData, CaptionPreset, CaptionLanguageMode } from './types';
@@ -237,7 +238,22 @@ export default function App() {
           );
           data = directResult;
         } catch (directErr: any) {
-          console.warn('Direct transcription notice:', directErr.message);
+          console.warn('Direct AssemblyAI notice:', directErr.message);
+          
+          // 3. Fallback to Browser Speech Recognition API
+          if (videoBlobUrl) {
+            try {
+              console.log('Attempting browser speech recognition engine fallback...');
+              const browserResult = await transcribeWithBrowserSpeech(
+                videoBlobUrl,
+                languageMode,
+                (curProgress) => setProgress(curProgress)
+              );
+              data = browserResult;
+            } catch (speechErr: any) {
+              console.warn('Browser speech recognition fallback notice:', speechErr.message);
+            }
+          }
         }
       }
 
@@ -245,7 +261,6 @@ export default function App() {
       setProgress(100);
 
       // In case speech is not detected or audio track is empty, generate baseline synced structure
-      const fallbackDuration = videoBlobUrl ? 10000 : 5000;
       const defaultDemoWords: CaptionWord[] = [
         { text: 'AutoCaptionX', start: 300, end: 1200, confidence: 0.99 },
         { text: 'AI', start: 1250, end: 1700, confidence: 0.99 },
@@ -255,10 +270,8 @@ export default function App() {
         { text: 'Ready!', start: 3800, end: 4600, confidence: 0.99 },
       ];
 
-      let rawGeneratedWords: CaptionWord[] =
-        data && data.words && Array.isArray(data.words) && data.words.length > 0
-          ? data.words
-          : defaultDemoWords;
+      const hasValidData = data && data.words && Array.isArray(data.words) && data.words.length > 0;
+      let rawGeneratedWords: CaptionWord[] = hasValidData ? data.words : defaultDemoWords;
 
       // Double-check English translation if Translate to English is selected
       if (languageMode === 'translate-en') {
@@ -273,14 +286,17 @@ export default function App() {
 
       const providerLabel = data?.source?.includes('assemblyai')
         ? 'AssemblyAI (Word-Level Sync)'
+        : data?.source?.includes('browser')
+        ? 'Browser Speech Recognition'
         : data?.source?.includes('gemini')
         ? 'Gemini Multimodal AI'
         : 'AutoCaptionX Speech Engine';
 
-      const successNotice =
-        languageMode === 'translate-en'
-          ? `Auto-captions translated to English & synced across full video!`
-          : `Captions generated successfully with ${providerLabel}!`;
+      const successNotice = hasValidData
+        ? languageMode === 'translate-en'
+          ? `Captions auto-transcribed & translated with ${providerLabel}!`
+          : `Captions generated & synced with ${providerLabel}!`
+        : `Sample captions loaded. (Enter your free AssemblyAI API key from assemblyai.com for custom video transcription)`;
 
       // Save to Account
       if (user) {

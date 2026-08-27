@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Header } from './components/Header';
 import { VideoUploader } from './components/VideoUploader';
 import { VideoPlayerPreview } from './components/VideoPlayerPreview';
@@ -406,6 +406,10 @@ export default function App() {
     }
   };
 
+  const handleTimeUpdate = useCallback((ms: number) => {
+    setCurrentTimeMs(ms);
+  }, []);
+
   return (
     <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col antialiased selection:bg-blue-600 selection:text-white">
       {/* Navigation Header */}
@@ -444,7 +448,7 @@ export default function App() {
           isGenerating={isGenerating}
           preset={captionPreset}
           seekTimeMs={seekTimeMs}
-          onTimeUpdate={(ms) => setCurrentTimeMs(ms)}
+          onTimeUpdate={handleTimeUpdate}
         />
 
         {/* Caption Synchronizer & Timeline Editor */}

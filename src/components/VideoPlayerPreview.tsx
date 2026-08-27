@@ -1,5 +1,5 @@
-import React, { useRef, useState, useEffect } from 'react';
-import { Sparkles, Play, Pause, Volume2, VolumeX, RotateCcw } from 'lucide-react';
+import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
+import { Sparkles, Play, Pause, Volume2, VolumeX, RotateCcw, Loader2 } from 'lucide-react';
 import type { CaptionWord, CaptionPreset } from '../types';
 
 interface VideoPlayerPreviewProps {
@@ -22,79 +22,178 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(false);
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
   const [durationMs, setDurationMs] = useState(0);
 
-  // Synchronize seek from parent (e.g. clicking word in Timeline)
+  // Keep a stable ref for onTimeUpdate to avoid recreating effects
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  useEffect(() => {
+    onTimeUpdateRef.current = onTimeUpdate;
+  }, [onTimeUpdate]);
+
+  const lastParentUpdateTimeRef = useRef(0);
+
+  // Synchronize external seek (e.g. from timeline editor)
   useEffect(() => {
     if (seekTimeMs !== null && videoRef.current) {
-      videoRef.current.currentTime = seekTimeMs / 1000;
+      const targetSec = Math.max(0, seekTimeMs / 1000);
+      videoRef.current.currentTime = targetSec;
       setCurrentTimeMs(seekTimeMs);
-      onTimeUpdate?.(seekTimeMs);
+      onTimeUpdateRef.current?.(seekTimeMs);
     }
   }, [seekTimeMs]);
 
+  // Main high-precision video playback & animation synchronization loop
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     let animFrameId: number;
 
-    const tick = () => {
+    const syncPlaybackTime = () => {
       if (video && !video.paused) {
-        const ms = video.currentTime * 1000;
+        const ms = Math.round(video.currentTime * 1000);
         setCurrentTimeMs(ms);
-        onTimeUpdate?.(ms);
-      }
-      animFrameId = requestAnimationFrame(tick);
-    };
 
-    const handleTimeUpdate = () => {
-      const ms = video.currentTime * 1000;
-      setCurrentTimeMs(ms);
-      onTimeUpdate?.(ms);
+        // Throttle parent onTimeUpdate to 150ms to prevent React render freezing
+        const now = performance.now();
+        if (now - lastParentUpdateTimeRef.current > 150) {
+          lastParentUpdateTimeRef.current = now;
+          onTimeUpdateRef.current?.(ms);
+        }
+      }
+      animFrameId = requestAnimationFrame(syncPlaybackTime);
     };
 
     const handleLoadedMetadata = () => {
       if (video.duration && !isNaN(video.duration)) {
-        setDurationMs(video.duration * 1000);
+        setDurationMs(Math.round(video.duration * 1000));
       }
+      setIsBuffering(false);
     };
 
     const handlePlay = () => {
       setIsPlaying(true);
-      animFrameId = requestAnimationFrame(tick);
+      setIsBuffering(false);
+      cancelAnimationFrame(animFrameId);
+      animFrameId = requestAnimationFrame(syncPlaybackTime);
+    };
+
+    const handlePlaying = () => {
+      setIsPlaying(true);
+      setIsBuffering(false);
     };
 
     const handlePause = () => {
       setIsPlaying(false);
+      setIsBuffering(false);
       cancelAnimationFrame(animFrameId);
+      if (video) {
+        const ms = Math.round(video.currentTime * 1000);
+        setCurrentTimeMs(ms);
+        onTimeUpdateRef.current?.(ms);
+      }
+    };
+
+    const handleWaiting = () => {
+      setIsBuffering(true);
+    };
+
+    const handleCanPlay = () => {
+      setIsBuffering(false);
+    };
+
+    const handleSeeking = () => {
+      if (video) {
+        const ms = Math.round(video.currentTime * 1000);
+        setCurrentTimeMs(ms);
+      }
+    };
+
+    const handleSeeked = () => {
+      if (video) {
+        const ms = Math.round(video.currentTime * 1000);
+        setCurrentTimeMs(ms);
+        onTimeUpdateRef.current?.(ms);
+      }
+      setIsBuffering(false);
+    };
+
+    const handleTimeUpdate = () => {
+      if (video) {
+        const ms = Math.round(video.currentTime * 1000);
+        setCurrentTimeMs(ms);
+      }
     };
 
     const handleEnded = () => {
       setIsPlaying(false);
+      setIsBuffering(false);
       cancelAnimationFrame(animFrameId);
     };
 
-    video.addEventListener('timeupdate', handleTimeUpdate);
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
     video.addEventListener('play', handlePlay);
+    video.addEventListener('playing', handlePlaying);
     video.addEventListener('pause', handlePause);
+    video.addEventListener('waiting', handleWaiting);
+    video.addEventListener('canplay', handleCanPlay);
+    video.addEventListener('seeking', handleSeeking);
+    video.addEventListener('seeked', handleSeeked);
+    video.addEventListener('timeupdate', handleTimeUpdate);
     video.addEventListener('ended', handleEnded);
+
+    // Initial check
+    if (video.duration && !isNaN(video.duration)) {
+      setDurationMs(Math.round(video.duration * 1000));
+    }
 
     return () => {
       cancelAnimationFrame(animFrameId);
-      video.removeEventListener('timeupdate', handleTimeUpdate);
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
       video.removeEventListener('play', handlePlay);
+      video.removeEventListener('playing', handlePlaying);
       video.removeEventListener('pause', handlePause);
+      video.removeEventListener('waiting', handleWaiting);
+      video.removeEventListener('canplay', handleCanPlay);
+      video.removeEventListener('seeking', handleSeeking);
+      video.removeEventListener('seeked', handleSeeked);
+      video.removeEventListener('timeupdate', handleTimeUpdate);
       video.removeEventListener('ended', handleEnded);
     };
-  }, [videoUrl, onTimeUpdate]);
+  }, [videoUrl]);
+
+  // Safe play/pause handler
+  const handleTogglePlay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (video.paused) {
+      if (video.ended) {
+        video.currentTime = 0;
+        setCurrentTimeMs(0);
+      }
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          console.warn('Playback resume handled smoothly:', err);
+        });
+      }
+    } else {
+      video.pause();
+    }
+  }, []);
+
+  // Sorted words to ensure 100% chronological consistency
+  const sortedWords = useMemo(() => {
+    if (!words || words.length === 0) return [];
+    return [...words].sort((a, b) => a.start - b.start);
+  }, [words]);
 
   // Group words into natural subtitle chunks (3-4 words) with exact timing boundaries
-  const phrases = React.useMemo(() => {
-    if (!words || words.length === 0) return [];
+  const phrases = useMemo(() => {
+    if (!sortedWords || sortedWords.length === 0) return [];
 
     const result: Array<{
       id: number;
@@ -115,17 +214,17 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         words: [...currentGroup],
         start,
         end,
-        displayUntil: end + 300,
+        displayUntil: end + 280,
       });
       currentGroup = [];
     };
 
-    for (let i = 0; i < words.length; i++) {
-      const w = words[i];
+    for (let i = 0; i < sortedWords.length; i++) {
+      const w = sortedWords[i];
       const prevW = currentGroup[currentGroup.length - 1];
 
       const hasPunctuation = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-      const isTimeGap = prevW && w.start - prevW.end > 500;
+      const isTimeGap = prevW && w.start - prevW.end > 450;
       const isMaxWords = currentGroup.length >= 4;
 
       if (currentGroup.length > 0 && (hasPunctuation || isTimeGap || isMaxWords)) {
@@ -136,40 +235,40 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
     flushGroup();
 
-    // Fine-tune display intervals to prevent overlaps and hide captions during long silences
+    // Fine-tune display intervals to prevent overlaps and hide captions during speech pauses
     for (let i = 0; i < result.length; i++) {
       const nextPhrase = result[i + 1];
       if (nextPhrase) {
         const gap = nextPhrase.start - result[i].end;
-        if (gap <= 400 && gap > 0) {
+        if (gap <= 350 && gap > 0) {
           result[i].displayUntil = nextPhrase.start;
         } else if (gap <= 0) {
           result[i].displayUntil = Math.max(result[i].end, nextPhrase.start - 10);
         } else {
-          // Normal pause in speech: hide caption cleanly after word finishes
-          result[i].displayUntil = result[i].end + 350;
+          // Normal pause in speech: hide caption cleanly after spoken phrase
+          result[i].displayUntil = result[i].end + 250;
         }
       } else {
-        result[i].displayUntil = result[i].end + 600;
+        result[i].displayUntil = result[i].end + 500;
       }
     }
 
     return result;
-  }, [words]);
+  }, [sortedWords]);
 
   // Find the currently active phrase chunk and accurately synchronized spoken word
-  const activePhrase = React.useMemo(() => {
+  const activePhrase = useMemo(() => {
     if (!phrases || phrases.length === 0) return null;
 
-    // Active phrase match within audio window
+    // Active phrase match within audio window (with generous 60ms lead-in)
     const current = phrases.find(
-      (p) => currentTimeMs >= p.start && currentTimeMs <= p.displayUntil
+      (p) => currentTimeMs >= p.start - 60 && currentTimeMs <= p.displayUntil
     );
 
     if (current) {
       let activeIdx = -1;
 
-      // Exact word boundary check
+      // 1. Direct word boundary check
       for (let i = 0; i < current.words.length; i++) {
         const w = current.words[i];
         if (currentTimeMs >= w.start && currentTimeMs <= w.end) {
@@ -178,7 +277,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         }
       }
 
-      // Smooth micro-gap handover: keep the closest previous word highlighted until next word starts
+      // 2. Smooth micro-gap handover between words
       if (activeIdx === -1) {
         if (currentTimeMs < current.words[0].start) {
           activeIdx = 0;
@@ -199,8 +298,8 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       };
     }
 
-    // Fallback: If video paused before first subtitle
-    if (currentTimeMs < phrases[0].start && !isPlaying) {
+    // Fallback: If video is paused right before the first phrase
+    if (currentTimeMs < phrases[0].start && !isPlaying && durationMs > 0) {
       return {
         phrase: phrases[0],
         activeWordIdx: 0,
@@ -208,7 +307,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
 
     return null;
-  }, [phrases, currentTimeMs, isPlaying]);
+  }, [phrases, currentTimeMs, isPlaying, durationMs]);
 
   // Preset styles
   const getWordStyle = (isCurrent: boolean, isPast: boolean) => {
@@ -246,10 +345,10 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     const rect = e.currentTarget.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const percentage = Math.max(0, Math.min(1, clickX / rect.width));
-    const newTimeMs = percentage * durationMs;
+    const newTimeMs = Math.round(percentage * durationMs);
     videoRef.current.currentTime = newTimeMs / 1000;
     setCurrentTimeMs(newTimeMs);
-    onTimeUpdate?.(newTimeMs);
+    onTimeUpdateRef.current?.(newTimeMs);
   };
 
   return (
@@ -261,7 +360,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             <span>AutoCaption</span>
             <span className="text-blue-500">X</span>
           </div>
-          <p className="text-xs text-slate-400 font-medium">5GB Support • AI Precision Sync</p>
+          <p className="text-xs text-slate-400 font-medium">5GB Support • Real-time AI Precision Sync</p>
         </div>
       ) : (
         /* Video Player + Subtitle Overlay */
@@ -269,29 +368,28 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
           <video
             ref={videoRef}
             src={videoUrl}
+            preload="auto"
             playsInline
             controls={false}
             loop={false}
             muted={isMuted}
-            onClick={() => {
-              if (videoRef.current) {
-                if (isPlaying) videoRef.current.pause();
-                else videoRef.current.play();
-              }
-            }}
+            onClick={handleTogglePlay}
             className="w-full h-full object-contain cursor-pointer"
           />
 
+          {/* Buffering Indicator */}
+          {isBuffering && (
+            <div className="absolute inset-0 m-auto w-12 h-12 rounded-full bg-black/70 backdrop-blur-xs flex items-center justify-center z-15 pointer-events-none">
+              <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
+            </div>
+          )}
+
           {/* Center Play Button Overlay when Paused */}
-          {!isPlaying && (
+          {!isPlaying && !isBuffering && (
             <button
               type="button"
-              onClick={() => {
-                if (videoRef.current) {
-                  videoRef.current.play();
-                }
-              }}
-              className="absolute inset-0 m-auto w-14 h-14 rounded-full bg-black/60 hover:bg-blue-600/80 border border-white/20 text-white flex items-center justify-center backdrop-blur-xs transition-all shadow-xl hover:scale-105 active:scale-95 cursor-pointer z-10 pointer-events-auto"
+              onClick={handleTogglePlay}
+              className="absolute inset-0 m-auto w-14 h-14 rounded-full bg-black/65 hover:bg-blue-600/90 border border-white/20 text-white flex items-center justify-center backdrop-blur-xs transition-all shadow-2xl hover:scale-110 active:scale-95 cursor-pointer z-10 pointer-events-auto"
               title="Play Video"
             >
               <Play className="w-6 h-6 fill-white translate-x-0.5" />
@@ -301,7 +399,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
           {/* Synchronized Subtitles Overlay */}
           {activePhrase && activePhrase.phrase.words.length > 0 && !isGenerating && (
             <div className="absolute bottom-12 inset-x-0 flex justify-center px-4 pointer-events-none z-20">
-              <div className="bg-black/85 backdrop-blur-md px-5 py-3 rounded-2xl border border-white/20 shadow-[0_10px_35px_rgba(0,0,0,0.8)] flex items-center justify-center flex-wrap gap-2.5 text-center max-w-lg transition-all duration-100 animate-in fade-in zoom-in-95">
+              <div className="bg-black/85 backdrop-blur-md px-5 py-3 rounded-2xl border border-white/20 shadow-[0_10px_35px_rgba(0,0,0,0.8)] flex items-center justify-center flex-wrap gap-2.5 text-center max-w-lg transition-all duration-75 animate-in fade-in zoom-in-95">
                 {activePhrase.phrase.words.map((w, idx) => {
                   const isCurrent = idx === activePhrase.activeWordIdx;
                   const isPast = idx < activePhrase.activeWordIdx;
@@ -309,7 +407,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                   return (
                     <span
                       key={`${w.text}-${w.start}-${idx}`}
-                      className={`text-base sm:text-lg md:text-2xl font-black tracking-wide transition-all duration-100 drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)] ${
+                      className={`text-base sm:text-lg md:text-2xl font-black tracking-wide transition-all duration-75 drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)] ${
                         isLatin ? 'uppercase' : ''
                       } ${getWordStyle(isCurrent, isPast)}`}
                       style={{
@@ -344,12 +442,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => {
-                    if (videoRef.current) {
-                      if (isPlaying) videoRef.current.pause();
-                      else videoRef.current.play();
-                    }
-                  }}
+                  onClick={handleTogglePlay}
                   className="p-1.5 bg-white/20 hover:bg-white/30 text-white rounded-lg transition-colors cursor-pointer"
                 >
                   {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
@@ -360,6 +453,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                     if (videoRef.current) {
                       videoRef.current.currentTime = 0;
                       setCurrentTimeMs(0);
+                      onTimeUpdateRef.current?.(0);
                     }
                   }}
                   className="p-1.5 bg-white/20 hover:bg-white/30 text-white rounded-lg transition-colors cursor-pointer"

@@ -422,24 +422,22 @@ export async function translateHindiWordsToEnglish(
       continue;
     }
 
-    // Distribute time proportionally across the exact segment duration with syllable weighting
-    const totalChars = engWords.reduce((sum, w) => sum + Math.max(2, w.length), 0) || 1;
-    let currentStart = chunk.start;
+    // Distribute time proportionally across the exact segment duration
+    const numWords = engWords.length;
+    const chunkDuration = Math.max(numWords * 200, chunk.end - chunk.start);
+    const step = chunkDuration / numWords;
 
-    engWords.forEach((word, wIdx) => {
-      const weight = Math.max(2, word.length) / totalChars;
-      const wordDuration = Math.max(160, Math.round(duration * weight));
-      const wordEnd = wIdx === engWords.length - 1 ? chunk.end : Math.min(chunk.end - 50, currentStart + wordDuration);
+    for (let wIdx = 0; wIdx < numWords; wIdx++) {
+      const wStart = Math.round(chunk.start + wIdx * step);
+      const wEnd = wIdx === numWords - 1 ? chunk.end : Math.round(wStart + step * 0.88);
 
       finalResult.push({
-        text: word,
-        start: currentStart,
-        end: Math.max(currentStart + 120, wordEnd),
+        text: engWords[wIdx],
+        start: wStart,
+        end: Math.max(wStart + 120, wEnd),
         confidence: 0.99,
       });
-
-      currentStart = wordEnd;
-    });
+    }
   }
 
   // Polish spelling and punctuation on translated words
@@ -448,7 +446,7 @@ export async function translateHindiWordsToEnglish(
   // Ensure timestamps are strictly non-decreasing and non-overlapping
   for (let i = 0; i < polished.length - 1; i++) {
     if (polished[i].end > polished[i + 1].start) {
-      polished[i].end = Math.max(polished[i].start + 80, polished[i + 1].start);
+      polished[i].end = Math.max(polished[i].start + 80, polished[i + 1].start - 10);
     }
   }
 

@@ -91,20 +91,20 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
     flushGroup();
 
-    // Fine-tune display intervals to prevent overlaps and hide captions cleanly during pauses
+    // Fine-tune display intervals to prevent overlaps and ensure continuous smooth caption display
     for (let i = 0; i < result.length; i++) {
       const nextPhrase = result[i + 1];
       if (nextPhrase) {
         const gap = nextPhrase.start - result[i].end;
-        if (gap <= 350 && gap > 0) {
+        if (gap <= 400 && gap > 0) {
           result[i].displayUntil = nextPhrase.start;
         } else if (gap <= 0) {
-          result[i].displayUntil = Math.max(result[i].end, nextPhrase.start - 10);
+          result[i].displayUntil = Math.max(result[i].end, nextPhrase.start - 5);
         } else {
-          result[i].displayUntil = result[i].end + 250;
+          result[i].displayUntil = result[i].end + 300;
         }
       } else {
-        result[i].displayUntil = result[i].end + 500;
+        result[i].displayUntil = result[i].end + 600;
       }
     }
 
@@ -122,11 +122,11 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       const mid = Math.floor((low + high) / 2);
       const p = phrases[mid];
 
-      if (curMs >= p.start - 60 && curMs <= p.displayUntil) {
+      if (curMs >= p.start - 40 && curMs <= p.displayUntil) {
         return mid;
       }
 
-      if (curMs < p.start - 60) {
+      if (curMs < p.start - 40) {
         high = mid - 1;
       } else {
         low = mid + 1;

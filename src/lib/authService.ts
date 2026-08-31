@@ -42,6 +42,11 @@ let auth: Auth | null = null;
 let db: Firestore | null = null;
 const googleProvider = new GoogleAuthProvider();
 
+// Force Google Account Chooser popup on every sign-in attempt
+googleProvider.setCustomParameters({
+  prompt: 'select_account',
+});
+
 try {
   app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
   auth = getAuth(app);
@@ -277,50 +282,46 @@ export async function signInAccount(email: string, pass: string): Promise<AppUse
   return appUser;
 }
 
-// 3. Google Sign In (Tries Firebase Popup, falls back to Instant One-Click Google Profile on static domain)
+// 3. Google Sign In (Authenticates with Google OAuth / Firebase Auth popup)
 export async function signInGoogle(): Promise<AppUser> {
-  if (auth) {
-    try {
-      const cred = await signInWithPopup(auth, googleProvider);
-      const appUser: AppUser = {
-        uid: cred.user.uid,
-        email: cred.user.email,
-        displayName: cred.user.displayName || 'Google User',
-        photoURL: cred.user.photoURL,
-        provider: 'google',
-      };
-      notifyAuthChange(appUser);
-      return appUser;
-    } catch (fbErr: any) {
-      console.warn('Google popup notice on static host:', fbErr.code || fbErr.message);
-      if (fbErr.code === 'auth/unauthorized-domain' || fbErr.code === 'auth/popup-blocked' || fbErr.code === 'auth/cancelled-popup-request') {
-        // Fallback: Create Instant Quick Profile on GitHub Pages
-        const guestUid = 'google_user_' + Date.now().toString(36);
-        const guestUser: AppUser = {
-          uid: guestUid,
-          email: 'creator@autocaptionx.app',
-          displayName: 'AutoCaptionX Creator',
-          photoURL: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80',
-          provider: 'local',
-        };
-        notifyAuthChange(guestUser);
-        return guestUser;
-      }
-      throw fbErr;
-    }
+  if (!auth) {
+    throw new Error('Authentication service is initializing. Please try again.');
   }
 
-  // Quick fallback if Firebase Auth is unavailable
-  const guestUid = 'google_user_' + Date.now().toString(36);
-  const guestUser: AppUser = {
-    uid: guestUid,
-    email: 'creator@autocaptionx.app',
-    displayName: 'AutoCaptionX Creator',
-    photoURL: null,
-    provider: 'local',
-  };
-  notifyAuthChange(guestUser);
-  return guestUser;
+  try {
+    const cred = await signInWithPopup(auth, googleProvider);
+    if (!cred || !cred.user) {
+      throw new Error('Google Sign-In was cancelled.');
+    }
+
+    const appUser: AppUser = {
+      uid: cred.user.uid,
+      email: cred.user.email,
+      displayName: cred.user.displayName || cred.user.email?.split('@')[0] || 'Google User',
+      photoURL: cred.user.photoURL,
+      provider: 'google',
+    };
+
+    notifyAuthChange(appUser);
+    return appUser;
+  } catch (fbErr: any) {
+    console.error('Google Sign-In Error:', fbErr);
+
+    if (fbErr.code === 'auth/unauthorized-domain') {
+      const currentHost = window.location.hostname;
+      throw new Error(
+        `Domain not authorized: Please add "${currentHost}" to Firebase Console -> Authentication -> Settings -> Authorized Domains.`
+      );
+    }
+    if (fbErr.code === 'auth/popup-blocked') {
+      throw new Error('Google Sign-In popup was blocked by browser. Please enable popups for this site and retry.');
+    }
+    if (fbErr.code === 'auth/popup-closed-by-user' || fbErr.code === 'auth/cancelled-popup-request') {
+      throw new Error('Sign-In cancelled. Please select your Google account from the popup.');
+    }
+
+    throw new Error(fbErr.message || 'Failed to sign in with Google.');
+  }
 }
 
 // 4. Sign Out

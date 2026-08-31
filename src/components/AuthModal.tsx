@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Mail, Lock, User as UserIcon, AlertCircle, Loader2, Sparkles, ShieldCheck, Zap } from 'lucide-react';
+import { X, Mail, Lock, User as UserIcon, AlertCircle, Loader2, Sparkles, ShieldCheck } from 'lucide-react';
 import { createAccount, signInAccount, signInGoogle } from '../lib/authService';
 
 interface AuthModalProps {
@@ -28,26 +28,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     } catch (err: any) {
       console.error('Google Sign-In Error:', err);
       setError(err.message || 'Failed to sign in with Google');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleQuickDemoAccess = async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      await createAccount('creator@autocaptionx.app', 'autocaption123', 'Creator Pro');
-      onClose();
-      onSuccess?.();
-    } catch (err: any) {
-      try {
-        await signInAccount('creator@autocaptionx.app', 'autocaption123');
-        onClose();
-        onSuccess?.();
-      } catch (innerErr: any) {
-        setError('Quick access failed. Please use email & password.');
-      }
     } finally {
       setLoading(false);
     }
@@ -142,16 +122,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
                 d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
               />
             </svg>
-            <span>Continue with Google</span>
-          </button>
-
-          <button
-            onClick={handleQuickDemoAccess}
-            disabled={loading}
-            className="w-full py-2.5 px-3 bg-indigo-950/50 hover:bg-indigo-900/60 border border-indigo-700/60 rounded-xl font-semibold text-xs text-indigo-300 flex items-center justify-center gap-2 transition-all active:scale-[0.99] disabled:opacity-50 cursor-pointer"
-          >
-            <Zap className="w-4 h-4 text-indigo-400" />
-            <span>Instant 1-Click Demo Account (No Password)</span>
+            <span>Continue with Google (Choose Account)</span>
           </button>
         </div>
 

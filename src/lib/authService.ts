@@ -8,6 +8,8 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as firebaseSignOut,
@@ -107,9 +109,38 @@ export function setLocalSessionUser(user: AppUser | null) {
   }
 }
 
+// Check if current browser is mobile / tablet
+export function isMobileDevice(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) || (window.innerWidth <= 768);
+}
+
 // Auth State Listeners
 type AuthListener = (user: AppUser | null) => void;
 const authListeners = new Set<AuthListener>();
+
+// Check for redirect result on page load (Mobile Redirect Flow)
+let redirectResultChecked = false;
+async function checkRedirectLogin() {
+  if (!auth || redirectResultChecked) return;
+  redirectResultChecked = true;
+  try {
+    const cred = await getRedirectResult(auth);
+    if (cred && cred.user) {
+      const appUser: AppUser = {
+        uid: cred.user.uid,
+        email: cred.user.email,
+        displayName: cred.user.displayName || cred.user.email?.split('@')[0] || 'Google User',
+        photoURL: cred.user.photoURL,
+        provider: 'google',
+      };
+      notifyAuthChange(appUser);
+    }
+  } catch (err: any) {
+    console.warn('Redirect login check notice:', err?.code || err?.message);
+  }
+}
 
 export function subscribeToAuthChanges(callback: AuthListener): () => void {
   authListeners.add(callback);
@@ -119,6 +150,9 @@ export function subscribeToAuthChanges(callback: AuthListener): () => void {
   if (initialLocal) {
     callback(initialLocal);
   }
+
+  // Check redirect login on page load
+  checkRedirectLogin();
 
   // Also bind Firebase onAuthStateChanged if Firebase Auth is active
   let unsubFirebase = () => {};
@@ -282,12 +316,32 @@ export async function signInAccount(email: string, pass: string): Promise<AppUse
   return appUser;
 }
 
-// 3. Google Sign In (Authenticates with Google OAuth / Firebase Auth popup)
-export async function signInGoogle(): Promise<AppUser> {
+// 3. Google Sign In (Hybrid: Mobile uses direct redirect, Desktop tries popup with seamless redirect fallback)
+export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | void> {
   if (!auth) {
     throw new Error('Authentication service is initializing. Please try again.');
   }
 
+  const isMobile = isMobileDevice();
+
+  // If on mobile device or explicitly requested, use signInWithRedirect directly
+  if (isMobile || preferRedirect) {
+    try {
+      await signInWithRedirect(auth, googleProvider);
+      return;
+    } catch (redirectErr: any) {
+      console.error('Google Redirect Error:', redirectErr);
+      if (redirectErr.code === 'auth/unauthorized-domain') {
+        const currentHost = window.location.hostname;
+        throw new Error(
+          `Domain not authorized: Please add "${currentHost}" to Firebase Console -> Authentication -> Settings -> Authorized Domains.`
+        );
+      }
+      throw new Error(redirectErr.message || 'Failed to redirect to Google Sign-In.');
+    }
+  }
+
+  // Desktop Flow: Try popup first
   try {
     const cred = await signInWithPopup(auth, googleProvider);
     if (!cred || !cred.user) {
@@ -305,19 +359,35 @@ export async function signInGoogle(): Promise<AppUser> {
     notifyAuthChange(appUser);
     return appUser;
   } catch (fbErr: any) {
-    console.error('Google Sign-In Error:', fbErr);
+    console.warn('Google Popup Notice:', fbErr?.code || fbErr?.message);
+
+    // If popup was blocked or closed or interrupted on mobile/desktop, seamlessly fallback to redirect
+    if (
+      fbErr.code === 'auth/popup-blocked' ||
+      fbErr.code === 'auth/cancelled-popup-request' ||
+      fbErr.code === 'auth/popup-closed-by-user' ||
+      fbErr.code === 'auth/operation-not-supported-in-this-environment'
+    ) {
+      try {
+        console.log('Falling back to Google Sign-In redirect...');
+        await signInWithRedirect(auth, googleProvider);
+        return;
+      } catch (redirectFallbackErr: any) {
+        if (redirectFallbackErr.code === 'auth/unauthorized-domain') {
+          const currentHost = window.location.hostname;
+          throw new Error(
+            `Domain not authorized: Please add "${currentHost}" to Firebase Console -> Authentication -> Settings -> Authorized Domains.`
+          );
+        }
+        throw new Error('Sign-In cancelled. Please select your Google account.');
+      }
+    }
 
     if (fbErr.code === 'auth/unauthorized-domain') {
       const currentHost = window.location.hostname;
       throw new Error(
         `Domain not authorized: Please add "${currentHost}" to Firebase Console -> Authentication -> Settings -> Authorized Domains.`
       );
-    }
-    if (fbErr.code === 'auth/popup-blocked') {
-      throw new Error('Google Sign-In popup was blocked by browser. Please enable popups for this site and retry.');
-    }
-    if (fbErr.code === 'auth/popup-closed-by-user' || fbErr.code === 'auth/cancelled-popup-request') {
-      throw new Error('Sign-In cancelled. Please select your Google account from the popup.');
     }
 
     throw new Error(fbErr.message || 'Failed to sign in with Google.');

@@ -91,46 +91,54 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
     flushGroup();
 
-    // Fine-tune display intervals to prevent overlaps and ensure continuous smooth caption display
+    // Fine-tune display intervals so captions stay visible until the next phrase begins
     for (let i = 0; i < result.length; i++) {
       const nextPhrase = result[i + 1];
       if (nextPhrase) {
-        const gap = nextPhrase.start - result[i].end;
-        if (gap <= 400 && gap > 0) {
-          result[i].displayUntil = nextPhrase.start;
-        } else if (gap <= 0) {
-          result[i].displayUntil = Math.max(result[i].end, nextPhrase.start - 5);
-        } else {
-          result[i].displayUntil = result[i].end + 300;
-        }
+        // Keep active phrase visible continuously until the next phrase takes over
+        result[i].displayUntil = Math.max(result[i].end, nextPhrase.start);
       } else {
-        result[i].displayUntil = result[i].end + 600;
+        result[i].displayUntil = result[i].end + 2500;
       }
     }
 
     return result;
   }, [sortedWords]);
 
-  // Fast Binary Search to locate active phrase index in O(log N) instead of O(N) for long videos
+  // Fast Binary Search to locate active phrase index with persistent display over gaps
   const findPhraseIndex = useCallback((curMs: number): number => {
     if (!phrases || phrases.length === 0) return -1;
 
+    // If before first phrase starts (with 50ms buffer), show no caption
+    if (curMs < phrases[0].start - 50) {
+      return -1;
+    }
+
     let low = 0;
     let high = phrases.length - 1;
+    let fallbackIdx = -1;
 
     while (low <= high) {
       const mid = Math.floor((low + high) / 2);
       const p = phrases[mid];
 
-      // Instant millisecond matching window
-      if (curMs >= p.start - 25 && curMs <= p.displayUntil) {
+      // Instant millisecond matching window (inclusive of silence until next phrase)
+      if (curMs >= p.start - 50 && curMs <= p.displayUntil) {
         return mid;
       }
 
-      if (curMs < p.start - 25) {
+      if (curMs < p.start - 50) {
         high = mid - 1;
       } else {
+        fallbackIdx = mid;
         low = mid + 1;
+      }
+    }
+
+    // If curMs is within valid playback range after phrases started, stay on closest previous phrase
+    if (fallbackIdx !== -1 && fallbackIdx < phrases.length) {
+      if (curMs <= phrases[fallbackIdx].displayUntil) {
+        return fallbackIdx;
       }
     }
 

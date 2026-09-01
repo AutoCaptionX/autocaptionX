@@ -34,26 +34,37 @@ async function getAccurateVideoDuration(video: HTMLVideoElement): Promise<number
   });
 }
 
-// Fast Binary Search for active subtitle phrase
+// Fast Binary Search for active subtitle phrase with persistent gap display
 function findActivePhraseIndex(
   phrases: Array<{ words: CaptionWord[]; start: number; end: number; displayUntil: number }>,
   curMs: number
 ): number {
+  if (!phrases || phrases.length === 0) return -1;
+  if (curMs < phrases[0].start - 50) return -1;
+
   let low = 0;
   let high = phrases.length - 1;
+  let fallbackIdx = -1;
 
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
     const p = phrases[mid];
 
-    if (curMs >= p.start - 60 && curMs <= p.displayUntil) {
+    if (curMs >= p.start - 50 && curMs <= p.displayUntil) {
       return mid;
     }
 
-    if (curMs < p.start - 60) {
+    if (curMs < p.start - 50) {
       high = mid - 1;
     } else {
+      fallbackIdx = mid;
       low = mid + 1;
+    }
+  }
+
+  if (fallbackIdx !== -1 && fallbackIdx < phrases.length) {
+    if (curMs <= phrases[fallbackIdx].displayUntil) {
+      return fallbackIdx;
     }
   }
 
@@ -218,16 +229,9 @@ export async function renderCaptionedVideo(
       for (let i = 0; i < phrases.length; i++) {
         const next = phrases[i + 1];
         if (next) {
-          const gap = next.start - phrases[i].end;
-          if (gap <= 400 && gap > 0) {
-            phrases[i].displayUntil = next.start;
-          } else if (gap <= 0) {
-            phrases[i].displayUntil = Math.max(phrases[i].end, next.start - 10);
-          } else {
-            phrases[i].displayUntil = phrases[i].end + 350;
-          }
+          phrases[i].displayUntil = Math.max(phrases[i].end, next.start);
         } else {
-          phrases[i].displayUntil = phrases[i].end + 600;
+          phrases[i].displayUntil = phrases[i].end + 2500;
         }
       }
 

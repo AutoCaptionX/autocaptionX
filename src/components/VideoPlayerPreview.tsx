@@ -56,7 +56,6 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       words: CaptionWord[];
       start: number;
       end: number;
-      displayUntil: number;
     }> = [];
 
     let currentGroup: CaptionWord[] = [];
@@ -70,7 +69,6 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         words: [...currentGroup],
         start,
         end,
-        displayUntil: end + 280,
       });
       currentGroup = [];
     };
@@ -80,7 +78,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       const prevW = currentGroup[currentGroup.length - 1];
 
       const hasPunctuation = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-      const isTimeGap = prevW && w.start - prevW.end > 450;
+      const isTimeGap = prevW && w.start - prevW.end > 500;
       const isMaxWords = currentGroup.length >= 4;
 
       if (currentGroup.length > 0 && (hasPunctuation || isTimeGap || isMaxWords)) {
@@ -91,58 +89,46 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
     flushGroup();
 
-    // Fine-tune display intervals so captions stay visible until the next phrase begins
-    for (let i = 0; i < result.length; i++) {
-      const nextPhrase = result[i + 1];
-      if (nextPhrase) {
-        // Keep active phrase visible continuously until the next phrase takes over
-        result[i].displayUntil = Math.max(result[i].end, nextPhrase.start);
-      } else {
-        result[i].displayUntil = result[i].end + 2500;
-      }
-    }
-
     return result;
   }, [sortedWords]);
 
-  // Fast Binary Search to locate active phrase index with persistent display over gaps
+  // Rock-solid O(log N) Binary Search for the active phrase with continuous gap persistence
   const findPhraseIndex = useCallback((curMs: number): number => {
     if (!phrases || phrases.length === 0) return -1;
-
-    // If before first phrase starts (with 50ms buffer), show no caption
-    if (curMs < phrases[0].start - 50) {
-      return -1;
-    }
+    if (curMs < phrases[0].start - 80) return -1;
 
     let low = 0;
     let high = phrases.length - 1;
-    let fallbackIdx = -1;
+    let resultIdx = -1;
 
     while (low <= high) {
-      const mid = Math.floor((low + high) / 2);
-      const p = phrases[mid];
-
-      // Instant millisecond matching window (inclusive of silence until next phrase)
-      if (curMs >= p.start - 50 && curMs <= p.displayUntil) {
-        return mid;
-      }
-
-      if (curMs < p.start - 50) {
-        high = mid - 1;
-      } else {
-        fallbackIdx = mid;
+      const mid = (low + high) >> 1;
+      if (phrases[mid].start - 80 <= curMs) {
+        resultIdx = mid;
         low = mid + 1;
+      } else {
+        high = mid - 1;
       }
     }
 
-    // If curMs is within valid playback range after phrases started, stay on closest previous phrase
-    if (fallbackIdx !== -1 && fallbackIdx < phrases.length) {
-      if (curMs <= phrases[fallbackIdx].displayUntil) {
-        return fallbackIdx;
+    if (resultIdx === -1) return -1;
+
+    const currentPhrase = phrases[resultIdx];
+    const nextPhrase = phrases[resultIdx + 1];
+
+    // Keep sentence visible until next sentence starts, unless there is a huge silence gap (> 4.5s)
+    if (nextPhrase) {
+      const gap = nextPhrase.start - currentPhrase.end;
+      if (gap > 4500 && curMs > currentPhrase.end + 4000) {
+        return -1;
+      }
+    } else {
+      if (curMs > currentPhrase.end + 3500) {
+        return -1;
       }
     }
 
-    return -1;
+    return resultIdx;
   }, [phrases]);
 
   // Synchronize external seek (e.g. from timeline editor)

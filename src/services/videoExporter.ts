@@ -36,39 +36,43 @@ async function getAccurateVideoDuration(video: HTMLVideoElement): Promise<number
 
 // Fast Binary Search for active subtitle phrase with persistent gap display
 function findActivePhraseIndex(
-  phrases: Array<{ words: CaptionWord[]; start: number; end: number; displayUntil: number }>,
+  phrases: Array<{ words: CaptionWord[]; start: number; end: number }>,
   curMs: number
 ): number {
   if (!phrases || phrases.length === 0) return -1;
-  if (curMs < phrases[0].start - 50) return -1;
+  if (curMs < phrases[0].start - 80) return -1;
 
   let low = 0;
   let high = phrases.length - 1;
-  let fallbackIdx = -1;
+  let resultIdx = -1;
 
   while (low <= high) {
-    const mid = Math.floor((low + high) / 2);
-    const p = phrases[mid];
-
-    if (curMs >= p.start - 50 && curMs <= p.displayUntil) {
-      return mid;
-    }
-
-    if (curMs < p.start - 50) {
-      high = mid - 1;
-    } else {
-      fallbackIdx = mid;
+    const mid = (low + high) >> 1;
+    if (phrases[mid].start - 80 <= curMs) {
+      resultIdx = mid;
       low = mid + 1;
+    } else {
+      high = mid - 1;
     }
   }
 
-  if (fallbackIdx !== -1 && fallbackIdx < phrases.length) {
-    if (curMs <= phrases[fallbackIdx].displayUntil) {
-      return fallbackIdx;
+  if (resultIdx === -1) return -1;
+
+  const currentPhrase = phrases[resultIdx];
+  const nextPhrase = phrases[resultIdx + 1];
+
+  if (nextPhrase) {
+    const gap = nextPhrase.start - currentPhrase.end;
+    if (gap > 4500 && curMs > currentPhrase.end + 4000) {
+      return -1;
+    }
+  } else {
+    if (curMs > currentPhrase.end + 3500) {
+      return -1;
     }
   }
 
-  return -1;
+  return resultIdx;
 }
 
 // Export 100% Full-Length Burned-In Captioned Video
@@ -195,7 +199,6 @@ export async function renderCaptionedVideo(
         words: CaptionWord[];
         start: number;
         end: number;
-        displayUntil: number;
       }> = [];
 
       let currentGroup: CaptionWord[] = [];
@@ -207,7 +210,6 @@ export async function renderCaptionedVideo(
           words: [...currentGroup],
           start,
           end,
-          displayUntil: end + 300,
         });
         currentGroup = [];
       };
@@ -216,7 +218,7 @@ export async function renderCaptionedVideo(
         const w = sortedWords[i];
         const prevW = currentGroup[currentGroup.length - 1];
         const hasPunct = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-        const isTimeGap = prevW && w.start - prevW.end > 450;
+        const isTimeGap = prevW && w.start - prevW.end > 500;
         const isMax = currentGroup.length >= 4;
 
         if (currentGroup.length > 0 && (hasPunct || isTimeGap || isMax)) {
@@ -225,15 +227,6 @@ export async function renderCaptionedVideo(
         currentGroup.push(w);
       }
       flushGroup();
-
-      for (let i = 0; i < phrases.length; i++) {
-        const next = phrases[i + 1];
-        if (next) {
-          phrases[i].displayUntil = Math.max(phrases[i].end, next.start);
-        } else {
-          phrases[i].displayUntil = phrases[i].end + 2500;
-        }
-      }
 
       // 4. Setup MediaRecorder with best supported mimeType
       const mimeTypes = [

@@ -122,11 +122,12 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       const mid = Math.floor((low + high) / 2);
       const p = phrases[mid];
 
-      if (curMs >= p.start - 40 && curMs <= p.displayUntil) {
+      // Instant millisecond matching window
+      if (curMs >= p.start - 25 && curMs <= p.displayUntil) {
         return mid;
       }
 
-      if (curMs < p.start - 40) {
+      if (curMs < p.start - 25) {
         high = mid - 1;
       } else {
         low = mid + 1;

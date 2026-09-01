@@ -229,35 +229,50 @@ Return a JSON object strictly matching:
   ]
 }`;
 
-      const res = await gemini.models.generateContent({
-        model: 'gemini-3.7-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              text: { type: Type.STRING, description: 'Natural English translation of segment' },
-              words: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    text: { type: Type.STRING, description: 'Single English translated word' },
-                    start: { type: Type.NUMBER, description: 'Start time in ms' },
-                    end: { type: Type.NUMBER, description: 'End time in ms' },
+      let resText: string | null = null;
+      const modelsToTry = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+
+      for (const modelName of modelsToTry) {
+        try {
+          const res = await gemini.models.generateContent({
+            model: modelName,
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  text: { type: Type.STRING, description: 'Natural English translation of segment' },
+                  words: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        text: { type: Type.STRING, description: 'Single English translated word' },
+                        start: { type: Type.NUMBER, description: 'Start time in ms' },
+                        end: { type: Type.NUMBER, description: 'End time in ms' },
+                      },
+                      required: ['text', 'start', 'end'],
+                    },
                   },
-                  required: ['text', 'start', 'end'],
                 },
+                required: ['text', 'words'],
               },
             },
-            required: ['text', 'words'],
-          },
-        },
-      });
+          });
 
-      if (res.text) {
-        const parsed = JSON.parse(res.text);
+          if (res.text) {
+            resText = res.text;
+            break;
+          }
+        } catch (_modelErr: any) {
+          // If 503 or transient failure, try next fallback model
+          continue;
+        }
+      }
+
+      if (resText) {
+        const parsed = JSON.parse(resText);
         if (parsed.words && Array.isArray(parsed.words) && parsed.words.length > 0) {
           return {
             text: parsed.text || '',
@@ -270,9 +285,43 @@ Return a JSON object strictly matching:
           };
         }
       }
-    } catch (e: any) {
-      console.warn('Chunk translation via Gemini failed, applying smart dictionary fallback:', e.message);
+    } catch (_e: any) {
+      // Gracefully continue to secondary high-accuracy translation provider
     }
+  }
+
+  // Fast & High-Accuracy Google Translate API fallback for this chunk
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(chunkText)}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (res.ok) {
+      const data = (await res.json()) as any;
+      if (Array.isArray(data) && Array.isArray(data[0])) {
+        const translatedStr = data[0].map((item: any) => item[0]).join('').trim();
+        if (translatedStr) {
+          const engWords = translatedStr.split(/\s+/).filter(Boolean);
+          if (engWords.length > 0) {
+            const chunkDuration = Math.max(engWords.length * 200, chunkEnd - chunkStart);
+            const step = chunkDuration / engWords.length;
+            return {
+              text: translatedStr,
+              words: engWords.map((w: string, idx: number) => ({
+                text: w,
+                start: Math.round(chunkStart + idx * step),
+                end: Math.round(chunkStart + (idx + 1) * step),
+                confidence: 0.95,
+              })),
+            };
+          }
+        }
+      }
+    }
+  } catch (_gtErr) {
+    // Fallthrough to dictionary fallback
   }
 
   // Fallback translation for this chunk

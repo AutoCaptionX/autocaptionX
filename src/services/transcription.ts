@@ -521,9 +521,18 @@ export async function transcribeDirectAssemblyAI(
         audio_url: audioUrl,
         punctuate: true,
         format_text: true,
-        language_detection: true,
         filter_profanity: false,
       };
+
+      if (languageMode === 'original') {
+        // Automatically detect spoken language (e.g. Hindi, Spanish, etc.) or preserve original
+        transcriptPayload.language_detection = true;
+      } else if (languageMode === 'translate-en') {
+        // When translate is chosen, detect language so we can translate from Hindi/Native to English
+        transcriptPayload.language_detection = true;
+      } else {
+        transcriptPayload.language_detection = true;
+      }
 
       const transcriptResponse = await fetch('https://api.assemblyai.com/v2/transcript', {
         method: 'POST',

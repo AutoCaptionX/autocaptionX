@@ -1,50 +1,13 @@
 import type { CaptionWord, CaptionPreset, VideoResolution } from '../types';
+import { generateSRT, generateWebVTT } from '../utils/captionConverters';
 
 export interface RenderProgressCallback {
   (percentage: number, statusText: string): void;
 }
 
-// Generate SubRip (.srt) subtitles file
+// Generate SubRip (.srt) subtitles file with precision millisecond alignment
 export function generateSrtContent(words: CaptionWord[]): string {
-  if (!words || words.length === 0) return '';
-
-  const sortedWords = [...words].sort((a, b) => a.start - b.start);
-  const phrases: Array<{ words: CaptionWord[]; start: number; end: number }> = [];
-  let current: CaptionWord[] = [];
-
-  const flush = () => {
-    if (current.length === 0) return;
-    phrases.push({
-      words: [...current],
-      start: current[0].start,
-      end: current[current.length - 1].end,
-    });
-    current = [];
-  };
-
-  for (const w of sortedWords) {
-    const prev = current[current.length - 1];
-    if (current.length >= 4 || (prev && w.start - prev.end > 500)) {
-      flush();
-    }
-    current.push(w);
-  }
-  flush();
-
-  const formatSrtTime = (ms: number): string => {
-    const hours = Math.floor(ms / 3600000).toString().padStart(2, '0');
-    const minutes = Math.floor((ms % 3600000) / 60000).toString().padStart(2, '0');
-    const seconds = Math.floor((ms % 60000) / 1000).toString().padStart(2, '0');
-    const millis = (ms % 1000).toString().padStart(3, '0');
-    return `${hours}:${minutes}:${seconds},${millis}`;
-  };
-
-  return phrases
-    .map((p, idx) => {
-      const lineText = p.words.map((w) => w.text).join(' ');
-      return `${idx + 1}\n${formatSrtTime(p.start)} --> ${formatSrtTime(p.end + 250)}\n${lineText}\n`;
-    })
-    .join('\n');
+  return generateSRT(words);
 }
 
 // Helper to determine exact finite duration of any video blob or source

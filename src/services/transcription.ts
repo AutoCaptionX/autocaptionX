@@ -522,6 +522,8 @@ export async function transcribeDirectAssemblyAI(
         punctuate: true,
         format_text: true,
         filter_profanity: false,
+        word_boost: ['AutoCaptionX', 'video', 'subscribe', 'channel', 'like', 'comment', 'share', 'namaste', 'bhai', 'dosto', 'hindi', 'english'],
+        boost_param: 'high',
       };
 
       if (languageMode === 'original') {

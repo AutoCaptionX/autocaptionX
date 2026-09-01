@@ -634,18 +634,29 @@ app.post('/api/captions/transcribe', (req, res) => {
 
           if (uploadUrl) {
             // Submit transcription job with Multilingual & Hindi speech recognition
+            const transcriptPayload: any = {
+              audio_url: uploadUrl,
+              punctuate: true,
+              format_text: true,
+              word_boost: ['AutoCaptionX', 'video', 'subscribe', 'channel', 'like', 'comment', 'share', 'namaste', 'bhai', 'dosto', 'hindi', 'english'],
+              boost_param: 'high',
+            };
+
+            if (languageMode === 'original') {
+              transcriptPayload.language_detection = true;
+            } else if (languageMode === 'translate-en') {
+              transcriptPayload.language_detection = true;
+            } else {
+              transcriptPayload.language_detection = true;
+            }
+
             const transcriptResponse = await fetch('https://api.assemblyai.com/v2/transcript', {
               method: 'POST',
               headers: {
                 authorization: assemblyKey,
                 'content-type': 'application/json',
               },
-              body: JSON.stringify({
-                audio_url: uploadUrl,
-                punctuate: true,
-                format_text: true,
-                language_detection: true, // Auto detect Hindi, Hinglish, English, etc.
-              }),
+              body: JSON.stringify(transcriptPayload),
             });
 
             if (transcriptResponse.ok) {

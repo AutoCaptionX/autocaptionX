@@ -182,24 +182,33 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         const phraseIdx = findPhraseIndex(curMs);
         if (phraseIdx !== -1) {
           const currentPhrase = phrases[phraseIdx];
-          let wordIdx = 0;
+          let wordIdx = -1;
 
+          // Exact millisecond window match for the currently spoken word
           for (let i = 0; i < currentPhrase.words.length; i++) {
             const w = currentPhrase.words[i];
             if (curMs >= w.start && curMs <= w.end) {
               wordIdx = i;
               break;
             }
-            if (curMs >= w.start) {
-              wordIdx = i;
+          }
+
+          // If in between words in the same phrase, track closest spoken word
+          if (wordIdx === -1) {
+            for (let i = 0; i < currentPhrase.words.length; i++) {
+              if (curMs >= currentPhrase.words[i].start) {
+                wordIdx = i;
+              }
             }
           }
 
+          const resolvedWordIdx = Math.max(0, wordIdx === -1 ? 0 : wordIdx);
+
           // Only trigger React state change if the word or phrase actually changed!
           const last = lastActiveWordRef.current;
-          if (!last || last.phraseIndex !== phraseIdx || last.wordIdx !== wordIdx) {
-            lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx };
-            setActiveSubtitle({ phraseIndex: phraseIdx, activeWordIdx: wordIdx });
+          if (!last || last.phraseIndex !== phraseIdx || last.wordIdx !== resolvedWordIdx) {
+            lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx: resolvedWordIdx };
+            setActiveSubtitle({ phraseIndex: phraseIdx, activeWordIdx: resolvedWordIdx });
           }
         } else {
           if (lastActiveWordRef.current !== null) {

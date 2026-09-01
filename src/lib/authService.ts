@@ -10,6 +10,8 @@ import {
   signInWithPopup,
   signInWithRedirect,
   getRedirectResult,
+  setPersistence,
+  browserLocalPersistence,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as firebaseSignOut,
@@ -44,17 +46,32 @@ let auth: Auth | null = null;
 let db: Firestore | null = null;
 const googleProvider = new GoogleAuthProvider();
 
-// Force Google Account Chooser popup on every sign-in attempt
+// Force Google Account Chooser & configure OAuth scopes
 googleProvider.setCustomParameters({
   prompt: 'select_account',
 });
+googleProvider.addScope('email');
+googleProvider.addScope('profile');
 
 try {
-  app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+  // Use project configuration with fallback for vizotube-77980 if running on GitHub Pages
+  const effectiveConfig = {
+    ...firebaseConfig,
+    authDomain: firebaseConfig.authDomain || 'vizotube-77980.firebaseapp.com',
+  };
+
+  app = !getApps().length ? initializeApp(effectiveConfig) : getApp();
   auth = getAuth(app);
-  db = getFirestore(app, firebaseConfig.firestoreDatabaseId || '(default)');
+  db = getFirestore(app, effectiveConfig.firestoreDatabaseId || '(default)');
+
+  // Ensure persistent local auth state across reloads
+  if (auth) {
+    setPersistence(auth, browserLocalPersistence).catch((err) => {
+      console.warn('[AutoCaptionX Auth] setPersistence note:', err?.message || err);
+    });
+  }
 } catch (e) {
-  console.warn('Firebase initialization notice:', e);
+  console.warn('[AutoCaptionX Auth] Firebase initialization note:', e);
 }
 
 export { auth, db, googleProvider };
@@ -122,12 +139,14 @@ const authListeners = new Set<AuthListener>();
 
 // Check for redirect result on page load (Mobile Redirect Flow)
 let redirectResultChecked = false;
-async function checkRedirectLogin() {
-  if (!auth || redirectResultChecked) return;
+export async function checkRedirectLogin(): Promise<AppUser | null> {
+  if (!auth || redirectResultChecked) return null;
   redirectResultChecked = true;
   try {
+    console.log('[AutoCaptionX Auth] Checking redirect authentication result...');
     const cred = await getRedirectResult(auth);
     if (cred && cred.user) {
+      console.log('[AutoCaptionX Auth] Redirect Sign-In verified successfully:', cred.user.email);
       const appUser: AppUser = {
         uid: cred.user.uid,
         email: cred.user.email,
@@ -136,10 +155,18 @@ async function checkRedirectLogin() {
         provider: 'google',
       };
       notifyAuthChange(appUser);
+      return appUser;
     }
   } catch (err: any) {
-    console.warn('Redirect login check notice:', err?.code || err?.message);
+    console.warn('[AutoCaptionX Auth] Redirect login check notice:', err?.code || err?.message);
+    if (err?.code === 'auth/unauthorized-domain') {
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'autocaptionx.github.io';
+      console.warn(
+        `[AutoCaptionX Auth] Please add "${currentHost}" and "autocaptionx.github.io" in Firebase Console (project vizotube-77980) -> Authentication -> Settings -> Authorized Domains.`
+      );
+    }
   }
+  return null;
 }
 
 export function subscribeToAuthChanges(callback: AuthListener): () => void {
@@ -159,6 +186,7 @@ export function subscribeToAuthChanges(callback: AuthListener): () => void {
   if (auth) {
     unsubFirebase = firebaseOnAuthStateChanged(auth, (fbUser) => {
       if (fbUser) {
+        console.log('[AutoCaptionX Auth] Firebase session active:', fbUser.email);
         const appUser: AppUser = {
           uid: fbUser.uid,
           email: fbUser.email,
@@ -198,6 +226,7 @@ export async function createAccount(email: string, pass: string, name?: string):
   // Try Firebase first
   if (auth) {
     try {
+      await setPersistence(auth, browserLocalPersistence).catch(() => {});
       const cred = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
       const appUser: AppUser = {
         uid: cred.user.uid,
@@ -263,6 +292,7 @@ export async function signInAccount(email: string, pass: string): Promise<AppUse
   // Try Firebase first
   if (auth) {
     try {
+      await setPersistence(auth, browserLocalPersistence).catch(() => {});
       const cred = await signInWithEmailAndPassword(auth, cleanEmail, pass);
       const appUser: AppUser = {
         uid: cred.user.uid,
@@ -319,7 +349,14 @@ export async function signInAccount(email: string, pass: string): Promise<AppUse
 // 3. Google Sign In (Hybrid: Mobile uses direct redirect, Desktop tries popup with seamless redirect fallback)
 export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | void> {
   if (!auth) {
-    throw new Error('Authentication service is initializing. Please try again.');
+    throw new Error('Authentication service is initializing. Please try again in a moment.');
+  }
+
+  // Ensure persistent local storage
+  try {
+    await setPersistence(auth, browserLocalPersistence);
+  } catch (e) {
+    // Continue even if setting persistence fails in restricted sandbox
   }
 
   const isMobile = isMobileDevice();
@@ -327,27 +364,30 @@ export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | 
   // If on mobile device or explicitly requested, use signInWithRedirect directly
   if (isMobile || preferRedirect) {
     try {
+      console.log('[AutoCaptionX Auth] Directing to Google Sign-In redirect flow...');
       await signInWithRedirect(auth, googleProvider);
       return;
     } catch (redirectErr: any) {
-      console.error('Google Redirect Error:', redirectErr);
+      console.error('[AutoCaptionX Auth] Google Redirect Error:', redirectErr);
       if (redirectErr.code === 'auth/unauthorized-domain') {
-        const currentHost = window.location.hostname;
+        const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'autocaptionx.github.io';
         throw new Error(
-          `Domain not authorized: Please add "${currentHost}" to Firebase Console -> Authentication -> Settings -> Authorized Domains.`
+          `Domain not authorized: Please add "${currentHost}" and "autocaptionx.github.io" in Firebase Console (vizotube-77980) -> Authentication -> Settings -> Authorized Domains.`
         );
       }
       throw new Error(redirectErr.message || 'Failed to redirect to Google Sign-In.');
     }
   }
 
-  // Desktop Flow: Try popup first
+  // Desktop Flow: Try popup first with automatic fallback
   try {
+    console.log('[AutoCaptionX Auth] Opening Google Sign-In popup...');
     const cred = await signInWithPopup(auth, googleProvider);
     if (!cred || !cred.user) {
       throw new Error('Google Sign-In was cancelled.');
     }
 
+    console.log('[AutoCaptionX Auth] Google Sign-In popup success:', cred.user.email);
     const appUser: AppUser = {
       uid: cred.user.uid,
       email: cred.user.email,
@@ -359,35 +399,44 @@ export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | 
     notifyAuthChange(appUser);
     return appUser;
   } catch (fbErr: any) {
-    console.warn('Google Popup Notice:', fbErr?.code || fbErr?.message);
+    console.warn('[AutoCaptionX Auth] Google Popup Notice:', fbErr?.code || fbErr?.message);
 
-    // If popup was blocked or closed or interrupted on mobile/desktop, seamlessly fallback to redirect
+    // If popup was blocked, closed, or unsupported -> seamlessly fallback to redirect
     if (
       fbErr.code === 'auth/popup-blocked' ||
       fbErr.code === 'auth/cancelled-popup-request' ||
       fbErr.code === 'auth/popup-closed-by-user' ||
-      fbErr.code === 'auth/operation-not-supported-in-this-environment'
+      fbErr.code === 'auth/operation-not-supported-in-this-environment' ||
+      fbErr.code === 'auth/internal-error'
     ) {
       try {
-        console.log('Falling back to Google Sign-In redirect...');
+        console.log('[AutoCaptionX Auth] Popup blocked or closed. Seamlessly falling back to Google Sign-In redirect...');
         await signInWithRedirect(auth, googleProvider);
         return;
       } catch (redirectFallbackErr: any) {
+        console.error('[AutoCaptionX Auth] Redirect fallback error:', redirectFallbackErr);
         if (redirectFallbackErr.code === 'auth/unauthorized-domain') {
-          const currentHost = window.location.hostname;
+          const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'autocaptionx.github.io';
           throw new Error(
-            `Domain not authorized: Please add "${currentHost}" to Firebase Console -> Authentication -> Settings -> Authorized Domains.`
+            `Domain not authorized: Please add "${currentHost}" and "autocaptionx.github.io" in Firebase Console (vizotube-77980) -> Authentication -> Settings -> Authorized Domains.`
           );
         }
-        throw new Error('Sign-In cancelled. Please select your Google account.');
+        if (fbErr.code === 'auth/popup-closed-by-user') {
+          throw new Error('Sign-In popup was closed. Please try again.');
+        }
+        throw new Error('Sign-In was interrupted. Please select your Google account.');
       }
     }
 
     if (fbErr.code === 'auth/unauthorized-domain') {
-      const currentHost = window.location.hostname;
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'autocaptionx.github.io';
       throw new Error(
-        `Domain not authorized: Please add "${currentHost}" to Firebase Console -> Authentication -> Settings -> Authorized Domains.`
+        `Domain not authorized: Please add "${currentHost}" and "autocaptionx.github.io" in Firebase Console (vizotube-77980) -> Authentication -> Settings -> Authorized Domains.`
       );
+    }
+
+    if (fbErr.code === 'auth/network-request-failed') {
+      throw new Error('Network error during authentication. Please check your internet connection.');
     }
 
     throw new Error(fbErr.message || 'Failed to sign in with Google.');
@@ -399,6 +448,7 @@ export async function logoutUser(): Promise<void> {
   if (auth) {
     try {
       await firebaseSignOut(auth);
+      console.log('[AutoCaptionX Auth] User signed out from Firebase.');
     } catch (e) {
       console.warn('Firebase signout notice:', e);
     }
@@ -485,3 +535,4 @@ export async function fetchUserProjects(user: AppUser): Promise<CaptionJobData[]
 
   return localList;
 }
+

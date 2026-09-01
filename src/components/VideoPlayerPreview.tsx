@@ -41,10 +41,17 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   const lastParentUpdateTimeRef = useRef(0);
   const lastActiveWordRef = useRef<{ phraseIndex: number; wordIdx: number } | null>(null);
 
-  // Sorted words to ensure 100% chronological consistency
+  // Sorted words with sanitized and validated timestamps
   const sortedWords = useMemo(() => {
     if (!words || words.length === 0) return [];
-    return [...words].sort((a, b) => a.start - b.start);
+    return [...words]
+      .filter((w) => Boolean(w && w.text && w.text.trim()))
+      .map((w, idx) => ({
+        ...w,
+        start: typeof w.start === 'number' && !isNaN(w.start) ? Math.max(0, w.start) : idx * 300,
+        end: typeof w.end === 'number' && !isNaN(w.end) ? Math.max(w.start + 100, w.end) : (idx + 1) * 300,
+      }))
+      .sort((a, b) => a.start - b.start);
   }, [words]);
 
   // Group words into natural subtitle chunks (3-4 words) with exact timing boundaries
@@ -92,14 +99,16 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     return result;
   }, [sortedWords]);
 
-  // Rock-solid O(log N) Binary Search for the active phrase with continuous gap persistence
+  // Rock-solid O(log N) Binary Search for the active phrase with continuous 100% persistence
+  // NEVER clears subtitles after speech starts; keeps the active/last phrase visible until video ends.
   const findPhraseIndex = useCallback((curMs: number): number => {
     if (!phrases || phrases.length === 0) return -1;
+    // Only return -1 before the first phrase start (with 80ms buffer)
     if (curMs < phrases[0].start - 80) return -1;
 
     let low = 0;
     let high = phrases.length - 1;
-    let resultIdx = -1;
+    let resultIdx = 0;
 
     while (low <= high) {
       const mid = (low + high) >> 1;
@@ -108,23 +117,6 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         low = mid + 1;
       } else {
         high = mid - 1;
-      }
-    }
-
-    if (resultIdx === -1) return -1;
-
-    const currentPhrase = phrases[resultIdx];
-    const nextPhrase = phrases[resultIdx + 1];
-
-    // Keep sentence visible until next sentence starts, unless there is a huge silence gap (> 4.5s)
-    if (nextPhrase) {
-      const gap = nextPhrase.start - currentPhrase.end;
-      if (gap > 4500 && curMs > currentPhrase.end + 4000) {
-        return -1;
-      }
-    } else {
-      if (curMs > currentPhrase.end + 3500) {
-        return -1;
       }
     }
 

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { X, Mail, Lock, User as UserIcon, AlertCircle, Loader2, Sparkles, ShieldCheck } from 'lucide-react';
-import { createAccount, signInAccount, signInGoogle } from '../lib/authService';
+import { X, Mail, Lock, User as UserIcon, AlertCircle, Loader2, Sparkles, ShieldCheck, ArrowRight } from 'lucide-react';
+import { createAccount, signInAccount, signInGoogle, isMobileDevice } from '../lib/authService';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -15,21 +15,31 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
   const handleGoogleSignIn = async () => {
     setError(null);
     setLoading(true);
+    const isMobile = isMobileDevice();
+    setStatusMessage(isMobile ? 'Redirecting to Google Sign-In...' : 'Opening Google Account Chooser...');
+
     try {
-      await signInGoogle();
-      onClose();
-      onSuccess?.();
+      const user = await signInGoogle();
+      if (user) {
+        setStatusMessage('Authenticated! Syncing workspace...');
+        setTimeout(() => {
+          onClose();
+          onSuccess?.();
+        }, 300);
+      }
     } catch (err: any) {
-      console.error('Google Sign-In Error:', err);
+      console.error('[AutoCaptionX Auth] Google Sign-In Error:', err);
       setError(err.message || 'Failed to sign in with Google');
     } finally {
       setLoading(false);
+      setStatusMessage(null);
     }
   };
 
@@ -41,6 +51,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     }
     setError(null);
     setLoading(true);
+    setStatusMessage(isRegister ? 'Creating your account...' : 'Signing in...');
 
     try {
       if (isRegister) {
@@ -48,10 +59,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
       } else {
         await signInAccount(email, password);
       }
-      onClose();
-      onSuccess?.();
+      setStatusMessage('Welcome! Syncing workspace...');
+      setTimeout(() => {
+        onClose();
+        onSuccess?.();
+      }, 300);
     } catch (err: any) {
-      console.error('Auth error:', err);
+      console.error('[AutoCaptionX Auth] Email Auth error:', err);
       let msg = err.message || 'Authentication failed';
       if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
         msg = 'Invalid email or password combination';
@@ -63,6 +77,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
       setError(msg);
     } finally {
       setLoading(false);
+      setStatusMessage(null);
     }
   };
 
@@ -71,7 +86,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
       <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-2xl p-6 shadow-2xl relative text-slate-100 animate-in fade-in zoom-in-95 duration-200">
         <button
           onClick={onClose}
-          className="absolute top-4 right-4 p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+          disabled={loading}
+          className="absolute top-4 right-4 p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
         >
           <X className="w-5 h-5" />
         </button>
@@ -89,11 +105,19 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
           </p>
         </div>
 
+        {/* Status notification */}
+        {statusMessage && (
+          <div className="mb-4 p-3 bg-blue-950/60 border border-blue-800 rounded-xl text-blue-300 text-xs flex items-center gap-2 animate-pulse">
+            <Loader2 className="w-4 h-4 text-blue-400 shrink-0 animate-spin" />
+            <span>{statusMessage}</span>
+          </div>
+        )}
+
         {/* Error notification */}
         {error && (
           <div className="mb-4 p-3 bg-red-950/60 border border-red-800 rounded-xl text-red-300 text-xs flex items-start gap-2">
             <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-            <span>{error}</span>
+            <span className="leading-relaxed">{error}</span>
           </div>
         )}
 
@@ -104,7 +128,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
             disabled={loading}
             className="w-full py-3 px-4 bg-white hover:bg-slate-100 text-slate-900 font-bold rounded-xl text-sm flex items-center justify-center gap-3 transition-all active:scale-[0.99] disabled:opacity-60 cursor-pointer shadow-md hover:shadow-lg"
           >
-            <svg className="w-5 h-5" viewBox="0 0 24 24">
+            <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
               <path
                 fill="#4285F4"
                 d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
@@ -122,7 +146,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
                 d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
               />
             </svg>
-            <span>Continue with Google (Choose Account)</span>
+            <span>{loading ? 'Connecting...' : 'Continue with Google'}</span>
           </button>
         </div>
 
@@ -191,9 +215,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
             {loading ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : isRegister ? (
-              'Create Free Account'
+              <>
+                <span>Create Free Account</span>
+                <ArrowRight className="w-4 h-4" />
+              </>
             ) : (
-              'Sign In'
+              <>
+                <span>Sign In</span>
+                <ArrowRight className="w-4 h-4" />
+              </>
             )}
           </button>
         </form>
@@ -221,3 +251,4 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     </div>
   );
 };
+

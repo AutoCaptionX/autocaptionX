@@ -15,6 +15,7 @@ import {
   subscribeToAuthChanges, 
   logoutUser, 
   saveCaptionProject, 
+  checkRedirectLogin,
   type AppUser 
 } from './lib/authService';
 import { transcribeDirectAssemblyAI, translateHindiWordsToEnglish, polishCaptionWords } from './services/transcription';
@@ -56,6 +57,11 @@ export default function App() {
 
   // Universal Auth State Listener (Syncs Firebase + LocalStorage Auth)
   useEffect(() => {
+    // Unconditionally capture redirect result from Google OAuth on return
+    checkRedirectLogin().catch((e) => {
+      console.warn('[AutoCaptionX Auth] Initial redirect check note:', e);
+    });
+
     const unsubscribe = subscribeToAuthChanges((currentUser) => {
       setUser(currentUser);
     });

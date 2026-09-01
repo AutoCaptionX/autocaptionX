@@ -289,9 +289,14 @@ export function polishCaptionWords(words: CaptionWord[]): CaptionWord[] {
       txt = txt.charAt(0).toUpperCase() + txt.slice(1);
     }
 
+    const safeStart = typeof raw.start === 'number' && !isNaN(raw.start) ? Math.max(0, raw.start) : (prev ? prev.end + 50 : 0);
+    const safeEnd = typeof raw.end === 'number' && !isNaN(raw.end) ? Math.max(safeStart + 80, raw.end) : safeStart + 250;
+
     cleaned.push({
       ...raw,
       text: txt,
+      start: safeStart,
+      end: safeEnd,
     });
   }
 

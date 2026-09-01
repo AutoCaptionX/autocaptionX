@@ -34,7 +34,7 @@ async function getAccurateVideoDuration(video: HTMLVideoElement): Promise<number
   });
 }
 
-// Fast Binary Search for active subtitle phrase with persistent gap display
+// Fast Binary Search for active subtitle phrase with 100% continuous persistence
 function findActivePhraseIndex(
   phrases: Array<{ words: CaptionWord[]; start: number; end: number }>,
   curMs: number
@@ -44,7 +44,7 @@ function findActivePhraseIndex(
 
   let low = 0;
   let high = phrases.length - 1;
-  let resultIdx = -1;
+  let resultIdx = 0;
 
   while (low <= high) {
     const mid = (low + high) >> 1;
@@ -53,22 +53,6 @@ function findActivePhraseIndex(
       low = mid + 1;
     } else {
       high = mid - 1;
-    }
-  }
-
-  if (resultIdx === -1) return -1;
-
-  const currentPhrase = phrases[resultIdx];
-  const nextPhrase = phrases[resultIdx + 1];
-
-  if (nextPhrase) {
-    const gap = nextPhrase.start - currentPhrase.end;
-    if (gap > 4500 && curMs > currentPhrase.end + 4000) {
-      return -1;
-    }
-  } else {
-    if (curMs > currentPhrase.end + 3500) {
-      return -1;
     }
   }
 
@@ -194,7 +178,14 @@ export async function renderCaptionedVideo(
       }
 
       // 3. Group words into subtitle chunks with chronological order
-      const sortedWords = [...words].sort((a, b) => a.start - b.start);
+      const sortedWords = [...words]
+        .filter((w) => Boolean(w && w.text && w.text.trim()))
+        .map((w, idx) => ({
+          ...w,
+          start: typeof w.start === 'number' && !isNaN(w.start) ? Math.max(0, w.start) : idx * 300,
+          end: typeof w.end === 'number' && !isNaN(w.end) ? Math.max(w.start + 100, w.end) : (idx + 1) * 300,
+        }))
+        .sort((a, b) => a.start - b.start);
       const phrases: Array<{
         words: CaptionWord[];
         start: number;

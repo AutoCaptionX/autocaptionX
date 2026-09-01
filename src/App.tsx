@@ -20,6 +20,7 @@ import {
 import { transcribeDirectAssemblyAI, translateHindiWordsToEnglish, polishCaptionWords } from './services/transcription';
 import { transcribeWithBrowserSpeech } from './services/browserSpeechTranscriber';
 import { renderCaptionedVideo, generateSrtContent } from './services/videoExporter';
+import { generateWebVTT } from './utils/captionConverters';
 import { downloadOrSaveVideoFile } from './utils/fileDownloader';
 import type { VideoResolution, CaptionWord, CaptionJobData, CaptionPreset, CaptionLanguageMode } from './types';
 
@@ -392,6 +393,16 @@ export default function App() {
     showToast('SubRip (.SRT) subtitle file saved to Downloads!');
   };
 
+  // Download WebVTT Subtitle File
+  const handleDownloadVtt = () => {
+    if (!selectedFile || words.length === 0) return;
+    const vttContent = generateWebVTT(words);
+    const blob = new Blob([vttContent], { type: 'text/vtt;charset=utf-8' });
+    const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
+    downloadOrSaveVideoFile(blob, `${baseName}_captions.vtt`);
+    showToast('WebVTT (.VTT) subtitle file saved to Downloads!');
+  };
+
   // Load project from History
   const handleSelectProject = (job: CaptionJobData) => {
     if (job.words && job.words.length > 0) {
@@ -500,6 +511,7 @@ export default function App() {
           onGenerate={handleGenerate}
           onDownload={handleDownload}
           onDownloadSrt={handleDownloadSrt}
+          onDownloadVtt={handleDownloadVtt}
           onReset={handleFileRemove}
         />
 

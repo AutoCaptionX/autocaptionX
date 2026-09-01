@@ -14,6 +14,7 @@ interface ActionControlsProps {
   onGenerate: () => void;
   onDownload: () => void;
   onDownloadSrt?: () => void;
+  onDownloadVtt?: () => void;
   onReset: () => void;
 }
 
@@ -29,6 +30,7 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
   onGenerate,
   onDownload,
   onDownloadSrt,
+  onDownloadVtt,
   onReset,
 }) => {
   const getResolutionLabel = () => {
@@ -123,17 +125,29 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
           )}
         </button>
 
-        {/* Subtitle SRT Download Option */}
-        {hasGeneratedCaptions && !isGenerating && !isExporting && onDownloadSrt && (
-          <div className="flex items-center justify-center pt-1">
-            <button
-              type="button"
-              onClick={onDownloadSrt}
-              className="text-xs text-slate-400 hover:text-blue-400 transition-colors flex items-center gap-1.5 py-1 px-3 rounded-lg hover:bg-slate-800/80 cursor-pointer font-medium"
-            >
-              <FileText className="w-3.5 h-3.5 text-blue-400" />
-              <span>Download Subtitle File (.SRT)</span>
-            </button>
+        {/* Subtitle SRT & VTT Download Options */}
+        {hasGeneratedCaptions && !isGenerating && !isExporting && (
+          <div className="flex items-center justify-center gap-2 pt-1 flex-wrap">
+            {onDownloadSrt && (
+              <button
+                type="button"
+                onClick={onDownloadSrt}
+                className="text-xs text-slate-400 hover:text-blue-400 transition-colors flex items-center gap-1.5 py-1 px-2.5 rounded-lg hover:bg-slate-800/80 cursor-pointer font-medium border border-slate-800"
+              >
+                <FileText className="w-3.5 h-3.5 text-blue-400" />
+                <span>Download .SRT</span>
+              </button>
+            )}
+            {onDownloadVtt && (
+              <button
+                type="button"
+                onClick={onDownloadVtt}
+                className="text-xs text-slate-400 hover:text-cyan-400 transition-colors flex items-center gap-1.5 py-1 px-2.5 rounded-lg hover:bg-slate-800/80 cursor-pointer font-medium border border-slate-800"
+              >
+                <FileText className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Download .VTT</span>
+              </button>
+            )}
           </div>
         )}
       </div>

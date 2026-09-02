@@ -14,15 +14,18 @@ import {
   type User
 } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
 
-const effectiveConfig = {
-  ...firebaseConfig,
-  projectId: 'vizotube-77980',
-  authDomain: 'vizotube-77980.firebaseapp.com',
+export const firebaseConfig = {
+  apiKey: "AIzaSyC8irMozxkYpuvva62jchdAcqV9WIgkyMs",
+  authDomain: "vizotube-77980.firebaseapp.com",
+  projectId: "vizotube-77980",
+  storageBucket: "vizotube-77980.firebasestorage.app",
+  messagingSenderId: "299339735795",
+  appId: "1:299339735795:web:1f003b45dfd688b40ecd86",
+  measurementId: "G-EXHXWJWBV8"
 };
 
-const app = !getApps().length ? initializeApp(effectiveConfig) : getApp();
+const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
@@ -34,7 +37,7 @@ googleProvider.setCustomParameters({
 googleProvider.addScope('email');
 googleProvider.addScope('profile');
 
-export const db = getFirestore(app, effectiveConfig.firestoreDatabaseId || '(default)');
+export const db = getFirestore(app);
 
 // Set browser local persistence immediately
 if (auth) {

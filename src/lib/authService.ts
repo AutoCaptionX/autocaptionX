@@ -54,10 +54,17 @@ googleProvider.addScope('email');
 googleProvider.addScope('profile');
 
 try {
-  // Use project configuration with fallback for vizotube-77980 if running on GitHub Pages
+  // Detect if running on GitHub Pages or custom host
+  const isGitHubHost = typeof window !== 'undefined' && (
+    window.location.hostname.includes('github.io') ||
+    window.location.hostname.includes('autocaptionx')
+  );
+
+  // Use project configuration with explicit domain resolution for vizotube-77980
   const effectiveConfig = {
     ...firebaseConfig,
-    authDomain: firebaseConfig.authDomain || 'vizotube-77980.firebaseapp.com',
+    projectId: isGitHubHost ? 'vizotube-77980' : (firebaseConfig.projectId || 'vizotube-77980'),
+    authDomain: isGitHubHost ? 'vizotube-77980.firebaseapp.com' : (firebaseConfig.authDomain || 'vizotube-77980.firebaseapp.com'),
   };
 
   app = !getApps().length ? initializeApp(effectiveConfig) : getApp();

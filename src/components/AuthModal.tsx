@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { X, Mail, Lock, User as UserIcon, AlertCircle, Loader2, Sparkles, ShieldCheck, ArrowRight } from 'lucide-react';
-import { createAccount, signInAccount, signInGoogle, isMobileDevice } from '../lib/authService';
+import { X, Mail, Lock, User as UserIcon, AlertCircle, Loader2, Sparkles, ShieldCheck, ArrowRight, Zap, ExternalLink } from 'lucide-react';
+import { createAccount, signInAccount, signInGoogle, isMobileDevice, setLocalSessionUser } from '../lib/authService';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -43,6 +43,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     }
   };
 
+  const handleGuestSignIn = () => {
+    const guestUser = {
+      uid: 'guest_' + Math.random().toString(36).substring(2, 10),
+      email: 'creator@autocaptionx.local',
+      displayName: 'AutoCaption Creator',
+      photoURL: null,
+      provider: 'local' as const,
+      createdAt: new Date().toISOString(),
+      lastLoginAt: new Date().toISOString(),
+    };
+    setLocalSessionUser(guestUser);
+    setStatusMessage('Access granted! Loading workspace...');
+    setTimeout(() => {
+      onClose();
+      onSuccess?.();
+      window.location.reload();
+    }, 300);
+  };
+
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password) {
@@ -83,7 +102,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-2xl p-6 shadow-2xl relative text-slate-100 animate-in fade-in zoom-in-95 duration-200">
+      <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-2xl p-6 shadow-2xl relative text-slate-100 animate-in fade-in zoom-in-95 duration-200 max-h-[95vh] overflow-y-auto">
         <button
           onClick={onClose}
           disabled={loading}
@@ -115,9 +134,24 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
 
         {/* Error notification */}
         {error && (
-          <div className="mb-4 p-3 bg-red-950/60 border border-red-800 rounded-xl text-red-300 text-xs flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-            <span className="leading-relaxed">{error}</span>
+          <div className="mb-4 p-3 bg-red-950/60 border border-red-800/80 rounded-xl text-red-300 text-xs space-y-2">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+              <span className="leading-relaxed">{error}</span>
+            </div>
+            {error.includes('Unauthorized Domain') && (
+              <div className="pt-2 border-t border-red-900/60 flex items-center justify-between text-[11px]">
+                <span className="text-slate-300">Quick fix: Add domain in Firebase Console</span>
+                <button
+                  type="button"
+                  onClick={handleGuestSignIn}
+                  className="bg-red-900/80 hover:bg-red-800 text-white font-medium px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                >
+                  <Zap className="w-3 h-3 text-yellow-300" />
+                  <span>Instant Access</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -228,18 +262,29 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
           </button>
         </form>
 
-        {/* Toggle between Register and Login */}
-        <div className="mt-4 text-center text-xs text-slate-400 flex items-center justify-center gap-1.5">
-          <span>{isRegister ? 'Already have an account?' : "Don't have an account?"}</span>
+        {/* Toggle between Register, Login, and Instant Access */}
+        <div className="mt-4 flex flex-col items-center gap-2">
+          <div className="text-center text-xs text-slate-400 flex items-center justify-center gap-1.5">
+            <span>{isRegister ? 'Already have an account?' : "Don't have an account?"}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setIsRegister(!isRegister);
+                setError(null);
+              }}
+              className="text-blue-400 hover:text-blue-300 font-semibold cursor-pointer underline-offset-2 hover:underline"
+            >
+              {isRegister ? 'Sign In' : 'Sign Up Free'}
+            </button>
+          </div>
+
           <button
             type="button"
-            onClick={() => {
-              setIsRegister(!isRegister);
-              setError(null);
-            }}
-            className="text-blue-400 hover:text-blue-300 font-semibold cursor-pointer underline-offset-2 hover:underline"
+            onClick={handleGuestSignIn}
+            className="text-xs text-slate-400 hover:text-white flex items-center gap-1.5 py-1 px-3 rounded-lg hover:bg-slate-800/80 transition-colors cursor-pointer"
           >
-            {isRegister ? 'Sign In' : 'Sign Up Free'}
+            <Zap className="w-3.5 h-3.5 text-yellow-400" />
+            <span>Instant Guest Mode (No sign up needed)</span>
           </button>
         </div>
 
@@ -251,4 +296,5 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     </div>
   );
 };
+
 

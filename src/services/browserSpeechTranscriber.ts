@@ -157,10 +157,18 @@ export async function transcribeWithBrowserSpeech(
     video.onloadedmetadata = () => {
       try {
         speechStartMs = 0;
+        const totalDuration = isFinite(video.duration) && video.duration > 0 ? video.duration : 30;
+        const safetyTimeoutMs = Math.max(60000, Math.round((totalDuration + 15) * 1000));
+        setTimeout(() => {
+          if (!isFinished) {
+            finishSuccess();
+          }
+        }, safetyTimeoutMs);
+
         recognition.start();
         video.play().catch(() => {
           video.muted = true;
-          video.play();
+          video.play().catch(() => {});
         });
       } catch (e) {
         reject(e);
@@ -171,13 +179,6 @@ export async function transcribeWithBrowserSpeech(
       cleanup();
       reject(new Error('Unable to read video media stream.'));
     };
-
-    // Safety timeout (max 45 seconds)
-    setTimeout(() => {
-      if (!isFinished) {
-        finishSuccess();
-      }
-    }, 45000);
   });
 }
 

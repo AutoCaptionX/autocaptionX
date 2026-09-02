@@ -191,8 +191,29 @@ export default function App() {
 
     setIsGenerating(true);
     setProgress(10);
+    setWords([]); // Clear previous words immediately
 
     const activeKey = localStorage.getItem('autocaption_assembly_key')?.trim() || DEFAULT_ASSEMBLY_KEY;
+
+    // Get video duration if available
+    let videoDurationMs = 15000;
+    try {
+      if (videoBlobUrl) {
+        const tempVid = document.createElement('video');
+        tempVid.src = videoBlobUrl;
+        await new Promise((resolve) => {
+          tempVid.onloadedmetadata = () => {
+            if (isFinite(tempVid.duration) && tempVid.duration > 0) {
+              videoDurationMs = Math.round(tempVid.duration * 1000);
+            }
+            resolve(true);
+          };
+          tempVid.onerror = () => resolve(false);
+          setTimeout(() => resolve(false), 1500);
+        });
+        tempVid.remove();
+      }
+    } catch (e) {}
 
     try {
       let data: any = null;
@@ -202,6 +223,7 @@ export default function App() {
         const formData = new FormData();
         formData.append('file', selectedFile);
         formData.append('languageMode', languageMode);
+        formData.append('durationMs', String(videoDurationMs));
 
         const headers: Record<string, string> = {};
         if (activeKey) {
@@ -259,21 +281,11 @@ export default function App() {
 
       setProgress(100);
 
-      // In case speech is not detected or audio track is empty, generate baseline synced structure
-      const defaultDemoWords: CaptionWord[] = [
-        { text: 'AutoCaptionX', start: 300, end: 1200, confidence: 0.99 },
-        { text: 'AI', start: 1250, end: 1700, confidence: 0.99 },
-        { text: 'Subtitles', start: 1750, end: 2500, confidence: 0.98 },
-        { text: 'Synchronized', start: 2550, end: 3400, confidence: 0.99 },
-        { text: 'and', start: 3450, end: 3750, confidence: 0.99 },
-        { text: 'Ready!', start: 3800, end: 4600, confidence: 0.99 },
-      ];
-
       const hasValidData = data && data.words && Array.isArray(data.words) && data.words.length > 0;
-      let rawGeneratedWords: CaptionWord[] = hasValidData ? data.words : defaultDemoWords;
+      let rawGeneratedWords: CaptionWord[] = hasValidData ? data.words : [];
 
       // Double-check English translation if Translate to English is selected
-      if (languageMode === 'translate-en') {
+      if (languageMode === 'translate-en' && rawGeneratedWords.length > 0) {
         const hasHindiChars = rawGeneratedWords.some((w) => /[\u0900-\u097F]/.test(w.text));
         if (hasHindiChars) {
           rawGeneratedWords = await translateHindiWordsToEnglish(rawGeneratedWords);
@@ -295,7 +307,7 @@ export default function App() {
         ? languageMode === 'translate-en'
           ? `Captions auto-transcribed & translated with ${providerLabel}!`
           : `Captions generated & synced with ${providerLabel}!`
-        : `Sample captions loaded. (Enter your free AssemblyAI API key from assemblyai.com for custom video transcription)`;
+        : `Audio analyzed. No audible speech detected in track.`;
 
       // Save to Account
       if (user) {

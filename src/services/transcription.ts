@@ -1,5 +1,5 @@
 import type { CaptionWord, CaptionLanguageMode } from '../types';
-import { extractAudioFromMediaFile } from '../utils/audioExtractor';
+import { extractAudioFromMediaFile, alignWordTimestampsWithAudio, sanitizeAndEnforceMonotonic } from '../utils/audioExtractor';
 
 export interface TranscriptionResult {
   id: string;
@@ -427,35 +427,32 @@ export async function translateHindiWordsToEnglish(
       continue;
     }
 
-    // Distribute time proportionally across the exact segment duration
+    // Distribute time proportionally with character weighting across the exact segment duration
     const numWords = engWords.length;
-    const chunkDuration = Math.max(numWords * 200, chunk.end - chunk.start);
-    const step = chunkDuration / numWords;
+    const chunkDuration = Math.max(numWords * 180, chunk.end - chunk.start);
+    const charWeights = engWords.map((w) => Math.max(2, w.replace(/[^\w]/g, '').length));
+    const totalWeight = charWeights.reduce((a, b) => a + b, 0);
 
+    let currentStart = chunk.start;
     for (let wIdx = 0; wIdx < numWords; wIdx++) {
-      const wStart = Math.round(chunk.start + wIdx * step);
-      const wEnd = wIdx === numWords - 1 ? chunk.end : Math.round(wStart + step * 0.88);
+      const weight = charWeights[wIdx] / totalWeight;
+      const wordDur = Math.max(120, Math.round(chunkDuration * weight));
+      const wEnd = wIdx === numWords - 1 ? chunk.end : currentStart + wordDur;
 
       finalResult.push({
         text: engWords[wIdx],
-        start: wStart,
-        end: Math.max(wStart + 120, wEnd),
+        start: currentStart,
+        end: Math.max(currentStart + 80, wEnd),
         confidence: 0.99,
       });
+
+      currentStart = wEnd;
     }
   }
 
   // Polish spelling and punctuation on translated words
   const polished = polishCaptionWords(finalResult);
-
-  // Ensure timestamps are strictly non-decreasing and non-overlapping
-  for (let i = 0; i < polished.length - 1; i++) {
-    if (polished[i].end > polished[i + 1].start) {
-      polished[i].end = Math.max(polished[i].start + 80, polished[i + 1].start - 10);
-    }
-  }
-
-  return polished;
+  return sanitizeAndEnforceMonotonic(polished);
 }
 
 // Client-side direct AssemblyAI transcription (Guaranteed HTTPS, CORS & Long Video handling)
@@ -479,12 +476,14 @@ export async function transcribeDirectAssemblyAI(
 
   onProgress?.(8);
 
-  // 1. Extract lightweight audio (WAV 16kHz) from video file in browser to speed up transfer 10x
+  // 1. Extract lightweight audio (WAV 16kHz) and AudioBuffer from video file
   let audioBlob: Blob = file;
+  let decodedAudioBuffer: AudioBuffer | null = null;
   try {
     onProgress?.(15);
     const audioExtraction = await extractAudioFromMediaFile(file);
     audioBlob = audioExtraction.blob;
+    decodedAudioBuffer = audioExtraction.audioBuffer || null;
   } catch (extractErr) {
     console.warn('Audio pre-extraction notice:', extractErr);
     audioBlob = file;
@@ -610,7 +609,9 @@ export async function transcribeDirectAssemblyAI(
             });
           }
 
-          let processedWords = polishCaptionWords(rawWords);
+          // Align word timestamps with Web Audio API context energy envelope
+          const audioAlignedWords = alignWordTimestampsWithAudio(rawWords, decodedAudioBuffer);
+          let processedWords = polishCaptionWords(audioAlignedWords);
 
           // Handle language translation / transliteration
           if (languageMode === 'translate-en') {
@@ -622,6 +623,8 @@ export async function transcribeDirectAssemblyAI(
               text: transliterateDevanagariToHinglish(w.text),
             }));
           }
+
+          processedWords = sanitizeAndEnforceMonotonic(processedWords);
 
           return {
             id: transcriptId,

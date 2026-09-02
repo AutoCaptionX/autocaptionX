@@ -34,29 +34,36 @@ async function getAccurateVideoDuration(video: HTMLVideoElement): Promise<number
   });
 }
 
-// Fast Binary Search for active subtitle phrase with 100% continuous persistence
+// Fast O(log N) Binary Search for active subtitle phrase matching audio currentTime bounds
+// Automatically clears previous caption text immediately when currentTime > caption.endTime or during pauses
 function findActivePhraseIndex(
   phrases: Array<{ words: CaptionWord[]; start: number; end: number }>,
   curMs: number
 ): number {
   if (!phrases || phrases.length === 0) return -1;
-  if (curMs < phrases[0].start - 80) return -1;
+  if (curMs < phrases[0].start - 40 || curMs > phrases[phrases.length - 1].end + 80) {
+    return -1;
+  }
 
   let low = 0;
   let high = phrases.length - 1;
-  let resultIdx = 0;
 
   while (low <= high) {
     const mid = (low + high) >> 1;
-    if (phrases[mid].start - 80 <= curMs) {
-      resultIdx = mid;
-      low = mid + 1;
-    } else {
+    const phrase = phrases[mid];
+
+    if (curMs >= phrase.start - 40 && curMs <= phrase.end + 80) {
+      return mid;
+    }
+
+    if (curMs < phrase.start - 40) {
       high = mid - 1;
+    } else {
+      low = mid + 1;
     }
   }
 
-  return Math.min(phrases.length - 1, Math.max(0, resultIdx));
+  return -1;
 }
 
 // Export 100% Full-Length Burned-In Captioned Video
@@ -349,31 +356,28 @@ function renderSubtitlesOnCanvas(
   ctx.save();
 
   const isVertical = height > width;
-  const baseFontSize = isVertical ? Math.max(26, Math.round(width * 0.058)) : Math.max(24, Math.round(height * 0.068));
-  const posY = isVertical ? height * 0.78 : height * 0.82;
+  const totalChars = phrase.words.reduce((sum, item) => sum + (item.text || '').length, 0);
+  const charScale = totalChars > 22 ? 0.85 : 1;
+  const baseFontSize = isVertical
+    ? Math.max(20, Math.round(width * 0.052 * charScale))
+    : Math.max(22, Math.round(height * 0.062 * charScale));
+  const posY = height * 0.85; // Lower-third (bottom: 15%)
 
-  // Active word index
-  let activeWordIdx = -1;
+  // Active word index matching audio bounds precisely
+  let activeWordIdx = 0;
   for (let i = 0; i < phrase.words.length; i++) {
     const w = phrase.words[i];
-    if (curMs >= w.start && curMs <= w.end) {
+    const nextW = phrase.words[i + 1];
+    const wordEndBound = nextW ? nextW.start : w.end + 150;
+
+    if (curMs >= w.start && curMs < wordEndBound) {
       activeWordIdx = i;
       break;
+    } else if (curMs >= w.end) {
+      activeWordIdx = i;
     }
   }
-  if (activeWordIdx === -1) {
-    if (curMs < phrase.words[0].start) {
-      activeWordIdx = 0;
-    } else {
-      for (let i = phrase.words.length - 1; i >= 0; i--) {
-        if (curMs >= phrase.words[i].start) {
-          activeWordIdx = i;
-          break;
-        }
-      }
-      if (activeWordIdx === -1) activeWordIdx = 0;
-    }
-  }
+  activeWordIdx = Math.max(0, Math.min(phrase.words.length - 1, activeWordIdx));
 
   const fontFamily =
     preset === 'hormozi'

@@ -399,28 +399,28 @@ export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | 
   }
 
   const isMobile = isMobileDevice();
+  const currentHost = typeof window !== 'undefined' && window.location && window.location.hostname ? window.location.hostname : 'autocaptionx.github.io';
 
   // If on mobile device or explicitly requested, use signInWithRedirect directly
   if (isMobile || preferRedirect) {
     try {
-      console.log('[AutoCaptionX Auth] Triggering Google Sign-In redirect flow...');
+      console.log(`[AutoCaptionX Auth] Triggering Google Sign-In redirect flow on ${currentHost}...`);
       await signInWithRedirect(auth, googleProvider);
       return;
     } catch (redirectErr: any) {
       console.error('[AutoCaptionX Auth] Google Redirect Error:', redirectErr);
       if (redirectErr.code === 'auth/unauthorized-domain') {
-        const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'autocaptionx.github.io';
         throw new Error(
-          `Domain not authorized yet: Please add "${currentHost}" and "autocaptionx.github.io" in Firebase Console (project vizotube-77980) -> Authentication -> Settings -> Authorized Domains. Alternatively, use email sign-in below!`
+          `Domain "${currentHost}" not authorized in Firebase Console (Project: vizotube-77980). Please add "${currentHost}" and "autocaptionx.github.io" under Authentication -> Settings -> Authorized Domains. Alternatively, use email sign-in below!`
         );
       }
       throw new Error(redirectErr.message || 'Failed to redirect to Google Sign-In.');
     }
   }
 
-  // Desktop Flow: Try popup first, with immediate auto-fallback to redirect on ANY popup block or domain mismatch
+  // Desktop Flow: Try popup first, wrapped in explicit try/catch with immediate auto-fallback to redirect on ANY popup block or domain mismatch
   try {
-    console.log('[AutoCaptionX Auth] Opening Google Sign-In popup...');
+    console.log(`[AutoCaptionX Auth] Opening Google Sign-In popup from ${currentHost}...`);
     const cred = await signInWithPopup(auth, googleProvider);
     if (!cred || !cred.user) {
       throw new Error('Google Sign-In was cancelled.');
@@ -438,7 +438,7 @@ export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | 
     notifyAuthChange(appUser);
     return appUser;
   } catch (fbErr: any) {
-    console.warn('[AutoCaptionX Auth] Google Popup notice/error:', fbErr?.code || fbErr?.message);
+    console.warn(`[AutoCaptionX Auth] Google Popup notice/error (${currentHost}):`, fbErr?.code || fbErr?.message);
 
     // If popup was blocked, closed, unsupported, OR if unauthorized domain in popup -> immediately fallback to redirect!
     if (
@@ -450,13 +450,12 @@ export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | 
       fbErr.code === 'auth/unauthorized-domain'
     ) {
       try {
-        console.log('[AutoCaptionX Auth] Falling back directly to Google Sign-In redirect flow...');
+        console.log(`[AutoCaptionX Auth] Falling back directly to Google Sign-In redirect flow on ${currentHost}...`);
         await signInWithRedirect(auth, googleProvider);
         return;
       } catch (redirectFallbackErr: any) {
         console.error('[AutoCaptionX Auth] Redirect fallback error:', redirectFallbackErr);
         if (redirectFallbackErr.code === 'auth/unauthorized-domain' || fbErr.code === 'auth/unauthorized-domain') {
-          const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'autocaptionx.github.io';
           throw new Error(
             `Unauthorized Domain: Please whitelist "${currentHost}" and "autocaptionx.github.io" in Firebase Console (Project: vizotube-77980) -> Authentication -> Settings -> Authorized Domains. Or use Instant Email Sign-In below.`
           );

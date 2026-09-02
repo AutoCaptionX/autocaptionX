@@ -16,16 +16,10 @@ import {
 import { getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
-// Detect if running on GitHub Pages or custom host
-const isGitHubHost = typeof window !== 'undefined' && (
-  window.location.hostname.includes('github.io') ||
-  window.location.hostname.includes('autocaptionx')
-);
-
 const effectiveConfig = {
   ...firebaseConfig,
-  projectId: isGitHubHost ? 'vizotube-77980' : (firebaseConfig.projectId || 'vizotube-77980'),
-  authDomain: isGitHubHost ? 'vizotube-77980.firebaseapp.com' : (firebaseConfig.authDomain || 'vizotube-77980.firebaseapp.com'),
+  projectId: 'vizotube-77980',
+  authDomain: 'vizotube-77980.firebaseapp.com',
 };
 
 const app = !getApps().length ? initializeApp(effectiveConfig) : getApp();

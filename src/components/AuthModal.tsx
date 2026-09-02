@@ -134,24 +134,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
 
         {/* Error notification */}
         {error && (
-          <div className="mb-4 p-3 bg-red-950/60 border border-red-800/80 rounded-xl text-red-300 text-xs space-y-2">
-            <div className="flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-              <span className="leading-relaxed">{error}</span>
-            </div>
-            {error.includes('Unauthorized Domain') && (
-              <div className="pt-2 border-t border-red-900/60 flex items-center justify-between text-[11px]">
-                <span className="text-slate-300">Quick fix: Add domain in Firebase Console</span>
-                <button
-                  type="button"
-                  onClick={handleGuestSignIn}
-                  className="bg-red-900/80 hover:bg-red-800 text-white font-medium px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
-                >
-                  <Zap className="w-3 h-3 text-yellow-300" />
-                  <span>Instant Access</span>
-                </button>
-              </div>
-            )}
+          <div className="mb-4 p-3 bg-red-950/60 border border-red-800/80 rounded-xl text-red-300 text-xs flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <span className="leading-relaxed">{error}</span>
           </div>
         )}
 

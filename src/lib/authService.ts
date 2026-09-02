@@ -54,17 +54,11 @@ googleProvider.addScope('email');
 googleProvider.addScope('profile');
 
 try {
-  // Detect if running on GitHub Pages or custom host
-  const isGitHubHost = typeof window !== 'undefined' && (
-    window.location.hostname.includes('github.io') ||
-    window.location.hostname.includes('autocaptionx')
-  );
-
   // Use project configuration with explicit domain resolution for vizotube-77980
   const effectiveConfig = {
     ...firebaseConfig,
-    projectId: isGitHubHost ? 'vizotube-77980' : (firebaseConfig.projectId || 'vizotube-77980'),
-    authDomain: isGitHubHost ? 'vizotube-77980.firebaseapp.com' : (firebaseConfig.authDomain || 'vizotube-77980.firebaseapp.com'),
+    projectId: 'vizotube-77980',
+    authDomain: 'vizotube-77980.firebaseapp.com',
   };
 
   app = !getApps().length ? initializeApp(effectiveConfig) : getApp();
@@ -190,12 +184,6 @@ export async function checkRedirectLogin(): Promise<AppUser | null> {
     }
   } catch (err: any) {
     console.warn('[AutoCaptionX Auth] Redirect login check notice:', err?.code || err?.message);
-    if (err?.code === 'auth/unauthorized-domain') {
-      const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'autocaptionx.github.io';
-      console.warn(
-        `[AutoCaptionX Auth] Please add "${currentHost}" and "autocaptionx.github.io" in Firebase Console (project vizotube-77980) -> Authentication -> Settings -> Authorized Domains.`
-      );
-    }
     // Clean stale / corrupt tokens if expired or invalid credential error occurs
     if (
       err?.code === 'auth/invalid-credential' ||
@@ -392,7 +380,7 @@ export async function signInAccount(email: string, pass: string): Promise<AppUse
   return appUser;
 }
 
-// 3. Google Sign In (Automatic fallback: Popup -> Redirect on any popup blocker or domain restriction)
+// 3. Google Sign In (Directly invoke popup with automatic redirect fallback)
 export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | void> {
   if (!auth) {
     throw new Error('Authentication service is initializing. Please try again in a moment.');
@@ -406,28 +394,22 @@ export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | 
   }
 
   const isMobile = isMobileDevice();
-  const currentHost = typeof window !== 'undefined' && window.location && window.location.hostname ? window.location.hostname : 'autocaptionx.github.io';
 
   // If on mobile device or explicitly requested, use signInWithRedirect directly
   if (isMobile || preferRedirect) {
     try {
-      console.log(`[AutoCaptionX Auth] Triggering Google Sign-In redirect flow on ${currentHost}...`);
+      console.log('[AutoCaptionX Auth] Triggering Google Sign-In redirect flow...');
       await signInWithRedirect(auth, googleProvider);
       return;
     } catch (redirectErr: any) {
       console.error('[AutoCaptionX Auth] Google Redirect Error:', redirectErr);
-      if (redirectErr.code === 'auth/unauthorized-domain') {
-        throw new Error(
-          `Domain "${currentHost}" not authorized in Firebase Console (Project: vizotube-77980). Please add "${currentHost}" and "autocaptionx.github.io" under Authentication -> Settings -> Authorized Domains. Alternatively, use email sign-in below!`
-        );
-      }
       throw new Error(redirectErr.message || 'Failed to redirect to Google Sign-In.');
     }
   }
 
-  // Desktop Flow: Try popup first, wrapped in explicit try/catch with immediate auto-fallback to redirect on ANY popup block or domain mismatch
+  // Desktop Flow: Try popup first, wrapped in explicit try/catch with immediate auto-fallback to redirect
   try {
-    console.log(`[AutoCaptionX Auth] Opening Google Sign-In popup from ${currentHost}...`);
+    console.log('[AutoCaptionX Auth] Opening Google Sign-In popup...');
     const cred = await signInWithPopup(auth, googleProvider);
     if (!cred || !cred.user) {
       throw new Error('Google Sign-In was cancelled.');
@@ -445,9 +427,9 @@ export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | 
     notifyAuthChange(appUser);
     return appUser;
   } catch (fbErr: any) {
-    console.warn(`[AutoCaptionX Auth] Google Popup notice/error (${currentHost}):`, fbErr?.code || fbErr?.message);
+    console.warn('[AutoCaptionX Auth] Google Popup notice/error:', fbErr?.code || fbErr?.message);
 
-    // If popup was blocked, closed, unsupported, OR if unauthorized domain in popup -> immediately fallback to redirect!
+    // If popup was blocked, closed, unsupported, or rejected -> immediately fallback to redirect!
     if (
       fbErr.code === 'auth/popup-blocked' ||
       fbErr.code === 'auth/cancelled-popup-request' ||
@@ -457,16 +439,11 @@ export async function signInGoogle(preferRedirect?: boolean): Promise<AppUser | 
       fbErr.code === 'auth/unauthorized-domain'
     ) {
       try {
-        console.log(`[AutoCaptionX Auth] Falling back directly to Google Sign-In redirect flow on ${currentHost}...`);
+        console.log('[AutoCaptionX Auth] Falling back directly to Google Sign-In redirect flow...');
         await signInWithRedirect(auth, googleProvider);
         return;
       } catch (redirectFallbackErr: any) {
         console.error('[AutoCaptionX Auth] Redirect fallback error:', redirectFallbackErr);
-        if (redirectFallbackErr.code === 'auth/unauthorized-domain' || fbErr.code === 'auth/unauthorized-domain') {
-          throw new Error(
-            `Unauthorized Domain: Please whitelist "${currentHost}" and "autocaptionx.github.io" in Firebase Console (Project: vizotube-77980) -> Authentication -> Settings -> Authorized Domains. Or use Instant Email Sign-In below.`
-          );
-        }
         if (fbErr.code === 'auth/popup-closed-by-user') {
           throw new Error('Sign-In popup was closed. Click again to continue.');
         }

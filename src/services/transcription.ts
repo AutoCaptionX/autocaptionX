@@ -564,9 +564,9 @@ export async function transcribeDirectAssemblyAI(
 
       onProgress?.(55);
 
-      // Step C: Poll for completion with adaptive interval (up to 240 attempts = 6 minutes for large videos)
+      // Step C: Poll for completion with adaptive interval (up to 360 attempts = 15 minutes for videos up to 30-60 mins)
       let attempts = 0;
-      const maxAttempts = 240;
+      const maxAttempts = 360;
 
       while (attempts < maxAttempts) {
         const waitTime = attempts < 10 ? 1500 : attempts < 30 ? 2000 : 2500;
@@ -585,7 +585,7 @@ export async function transcribeDirectAssemblyAI(
         }
 
         const pollData = (await pollResponse.json()) as any;
-        onProgress?.(Math.min(78, 55 + Math.round((attempts / 40) * 23)));
+        onProgress?.(Math.min(79, 55 + Math.round((attempts / 60) * 24)));
 
         if (pollData.status === 'completed') {
           const rawWords: CaptionWord[] = (pollData.words || []).map((w: any) => ({

@@ -41,20 +41,27 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   const lastParentUpdateTimeRef = useRef(0);
   const lastActiveWordRef = useRef<{ phraseIndex: number; wordIdx: number } | null>(null);
 
-  // Sorted words with sanitized and validated timestamps
+  // Sorted words with sanitized, monotonic, and validated timestamps
   const sortedWords = useMemo(() => {
     if (!words || words.length === 0) return [];
-    return [...words]
+    const valid = [...words]
       .filter((w) => Boolean(w && w.text && w.text.trim()))
-      .map((w, idx) => ({
-        ...w,
-        start: typeof w.start === 'number' && !isNaN(w.start) ? Math.max(0, w.start) : idx * 300,
-        end: typeof w.end === 'number' && !isNaN(w.end) ? Math.max(w.start + 100, w.end) : (idx + 1) * 300,
-      }))
+      .map((w, idx) => {
+        const start = typeof w.start === 'number' && !isNaN(w.start) ? Math.max(0, Math.round(w.start)) : idx * 300;
+        const end = typeof w.end === 'number' && !isNaN(w.end) ? Math.max(start + 80, Math.round(w.end)) : start + 250;
+        return {
+          ...w,
+          text: w.text.trim(),
+          start,
+          end,
+        };
+      })
       .sort((a, b) => a.start - b.start);
+
+    return valid;
   }, [words]);
 
-  // Group words into natural subtitle chunks (3-4 words) with exact timing boundaries
+  // Group words into natural subtitle chunks (3-5 words) with exact continuous timeline coverage
   const phrases = useMemo(() => {
     if (!sortedWords || sortedWords.length === 0) return [];
 
@@ -85,7 +92,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       const prevW = currentGroup[currentGroup.length - 1];
 
       const hasPunctuation = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-      const isTimeGap = prevW && w.start - prevW.end > 500;
+      const isTimeGap = prevW && w.start - prevW.end > 700;
       const isMaxWords = currentGroup.length >= 4;
 
       if (currentGroup.length > 0 && (hasPunctuation || isTimeGap || isMaxWords)) {
@@ -99,11 +106,11 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     return result;
   }, [sortedWords]);
 
-  // Rock-solid O(log N) Binary Search for the active phrase with continuous 100% persistence
-  // NEVER clears subtitles after speech starts; keeps the active/last phrase visible until video ends.
+  // Rock-solid O(log N) Binary Search for active phrase with continuous 100% persistence
+  // Keeps the current active caption block visible until the exact start timestamp of the next block arrives.
   const findPhraseIndex = useCallback((curMs: number): number => {
     if (!phrases || phrases.length === 0) return -1;
-    // Only return -1 before the first phrase start (with 80ms buffer)
+    // Only clear if seeking before the very first caption (with an 80ms buffer)
     if (curMs < phrases[0].start - 80) return -1;
 
     let low = 0;
@@ -120,34 +127,69 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       }
     }
 
-    return resultIdx;
+    return Math.min(phrases.length - 1, Math.max(0, resultIdx));
   }, [phrases]);
+
+  // Synchronize subtitle state for a given millisecond timestamp
+  const syncSubtitleForTime = useCallback((curMs: number) => {
+    if (!phrases || phrases.length === 0) {
+      if (lastActiveWordRef.current !== null) {
+        lastActiveWordRef.current = null;
+        setActiveSubtitle(null);
+      }
+      return;
+    }
+
+    const phraseIdx = findPhraseIndex(curMs);
+    if (phraseIdx !== -1 && phraseIdx < phrases.length) {
+      const currentPhrase = phrases[phraseIdx];
+      let wordIdx = -1;
+
+      // Exact millisecond window match for the currently spoken word
+      for (let i = 0; i < currentPhrase.words.length; i++) {
+        const w = currentPhrase.words[i];
+        if (curMs >= w.start && curMs <= w.end) {
+          wordIdx = i;
+          break;
+        }
+      }
+
+      // If between words in the same phrase, track closest spoken word
+      if (wordIdx === -1) {
+        for (let i = currentPhrase.words.length - 1; i >= 0; i--) {
+          if (curMs >= currentPhrase.words[i].start) {
+            wordIdx = i;
+            break;
+          }
+        }
+      }
+
+      const resolvedWordIdx = Math.max(0, Math.min(currentPhrase.words.length - 1, wordIdx === -1 ? 0 : wordIdx));
+
+      const last = lastActiveWordRef.current;
+      if (!last || last.phraseIndex !== phraseIdx || last.wordIdx !== resolvedWordIdx) {
+        lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx: resolvedWordIdx };
+        setActiveSubtitle({ phraseIndex: phraseIdx, activeWordIdx: resolvedWordIdx });
+      }
+    } else {
+      if (lastActiveWordRef.current !== null) {
+        lastActiveWordRef.current = null;
+        setActiveSubtitle(null);
+      }
+    }
+  }, [findPhraseIndex, phrases]);
 
   // Synchronize external seek (e.g. from timeline editor)
   useEffect(() => {
     if (seekTimeMs !== null && videoRef.current) {
       const targetSec = Math.max(0, seekTimeMs / 1000);
       videoRef.current.currentTime = targetSec;
-      
-      const pIdx = findPhraseIndex(seekTimeMs);
-      if (pIdx !== -1) {
-        const p = phrases[pIdx];
-        let wIdx = 0;
-        for (let i = 0; i < p.words.length; i++) {
-          if (seekTimeMs >= p.words[i].start) wIdx = i;
-        }
-        setActiveSubtitle({ phraseIndex: pIdx, activeWordIdx: wIdx });
-        lastActiveWordRef.current = { phraseIndex: pIdx, wordIdx: wIdx };
-      } else {
-        setActiveSubtitle(null);
-        lastActiveWordRef.current = null;
-      }
-
+      syncSubtitleForTime(seekTimeMs);
       onTimeUpdateRef.current?.(seekTimeMs);
     }
-  }, [seekTimeMs, findPhraseIndex, phrases]);
+  }, [seekTimeMs, syncSubtitleForTime]);
 
-  // High-performance RAF playback loop that NEVER causes React re-render lag
+  // High-performance RAF playback loop + native timeupdate listener for 100% continuous sync
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -164,44 +206,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
           progressBarRef.current.style.width = `${pct}%`;
         }
 
-        // Fast O(log N) Phrase Match
-        const phraseIdx = findPhraseIndex(curMs);
-        if (phraseIdx !== -1) {
-          const currentPhrase = phrases[phraseIdx];
-          let wordIdx = -1;
-
-          // Exact millisecond window match for the currently spoken word
-          for (let i = 0; i < currentPhrase.words.length; i++) {
-            const w = currentPhrase.words[i];
-            if (curMs >= w.start && curMs <= w.end) {
-              wordIdx = i;
-              break;
-            }
-          }
-
-          // If in between words in the same phrase, track closest spoken word
-          if (wordIdx === -1) {
-            for (let i = 0; i < currentPhrase.words.length; i++) {
-              if (curMs >= currentPhrase.words[i].start) {
-                wordIdx = i;
-              }
-            }
-          }
-
-          const resolvedWordIdx = Math.max(0, wordIdx === -1 ? 0 : wordIdx);
-
-          // Only trigger React state change if the word or phrase actually changed!
-          const last = lastActiveWordRef.current;
-          if (!last || last.phraseIndex !== phraseIdx || last.wordIdx !== resolvedWordIdx) {
-            lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx: resolvedWordIdx };
-            setActiveSubtitle({ phraseIndex: phraseIdx, activeWordIdx: resolvedWordIdx });
-          }
-        } else {
-          if (lastActiveWordRef.current !== null) {
-            lastActiveWordRef.current = null;
-            setActiveSubtitle(null);
-          }
-        }
+        syncSubtitleForTime(curMs);
 
         // Throttle parent onTimeUpdate to 160ms for smooth timeline list indicator
         const now = performance.now();
@@ -212,6 +217,16 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       }
 
       animFrameId = requestAnimationFrame(checkSubtitleSync);
+    };
+
+    const handleTimeUpdate = () => {
+      if (!video) return;
+      const curMs = Math.round(video.currentTime * 1000);
+      if (progressBarRef.current && video.duration > 0) {
+        const pct = Math.min(100, Math.max(0, (video.currentTime / video.duration) * 100));
+        progressBarRef.current.style.width = `${pct}%`;
+      }
+      syncSubtitleForTime(curMs);
     };
 
     const handleLoadedMetadata = () => {
@@ -234,6 +249,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       cancelAnimationFrame(animFrameId);
       if (video) {
         const curMs = Math.round(video.currentTime * 1000);
+        syncSubtitleForTime(curMs);
         onTimeUpdateRef.current?.(curMs);
       }
     };
@@ -248,19 +264,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
           const pct = Math.min(100, Math.max(0, (video.currentTime / video.duration) * 100));
           progressBarRef.current.style.width = `${pct}%`;
         }
-        const pIdx = findPhraseIndex(curMs);
-        if (pIdx !== -1) {
-          const p = phrases[pIdx];
-          let wIdx = 0;
-          for (let i = 0; i < p.words.length; i++) {
-            if (curMs >= p.words[i].start) wIdx = i;
-          }
-          setActiveSubtitle({ phraseIndex: pIdx, activeWordIdx: wIdx });
-          lastActiveWordRef.current = { phraseIndex: pIdx, wordIdx: wIdx };
-        } else {
-          setActiveSubtitle(null);
-          lastActiveWordRef.current = null;
-        }
+        syncSubtitleForTime(curMs);
         onTimeUpdateRef.current?.(curMs);
       }
       setIsBuffering(false);
@@ -273,6 +277,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     };
 
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
+    video.addEventListener('timeupdate', handleTimeUpdate);
     video.addEventListener('play', handlePlay);
     video.addEventListener('playing', handlePlay);
     video.addEventListener('pause', handlePause);
@@ -288,6 +293,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     return () => {
       cancelAnimationFrame(animFrameId);
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('timeupdate', handleTimeUpdate);
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('playing', handlePlay);
       video.removeEventListener('pause', handlePause);
@@ -296,7 +302,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       video.removeEventListener('seeked', handleSeeked);
       video.removeEventListener('ended', handleEnded);
     };
-  }, [videoUrl, phrases, findPhraseIndex]);
+  }, [videoUrl, syncSubtitleForTime]);
 
   // Safe play/pause toggle
   const handleTogglePlay = useCallback(() => {
@@ -406,10 +412,10 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             </button>
           )}
 
-          {/* Precision Active Subtitles Overlay */}
+          {/* Precision Active Subtitles Overlay (100% Persistent, Multi-line Safe, Zero Truncation) */}
           {currentActivePhrase && currentActivePhrase.words.length > 0 && !isGenerating && (
-            <div className="absolute bottom-12 inset-x-0 flex justify-center px-4 pointer-events-none z-20">
-              <div className="bg-black/85 backdrop-blur-md px-5 py-3 rounded-2xl border border-white/20 shadow-[0_10px_35px_rgba(0,0,0,0.8)] flex items-center justify-center flex-wrap gap-2.5 text-center max-w-lg transition-all duration-75 animate-in fade-in zoom-in-95">
+            <div className="absolute bottom-10 sm:bottom-12 inset-x-0 flex justify-center px-3 sm:px-6 pointer-events-none z-20">
+              <div className="bg-black/90 backdrop-blur-md px-4 sm:px-6 py-2.5 sm:py-3.5 rounded-2xl border border-white/20 shadow-[0_10px_35px_rgba(0,0,0,0.85)] flex items-center justify-center flex-wrap gap-2 sm:gap-3 text-center max-w-[92%] sm:max-w-xl md:max-w-2xl transition-all duration-75 animate-in fade-in zoom-in-95">
                 {currentActivePhrase.words.map((w, idx) => {
                   const isCurrent = activeSubtitle !== null && idx === activeSubtitle.activeWordIdx;
                   const isPast = activeSubtitle !== null && idx < activeSubtitle.activeWordIdx;
@@ -417,7 +423,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                   return (
                     <span
                       key={`${w.text}-${w.start}-${idx}`}
-                      className={`text-base sm:text-lg md:text-2xl font-black tracking-wide transition-all duration-75 drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)] ${
+                      className={`text-sm sm:text-lg md:text-2xl font-black tracking-wide leading-tight transition-all duration-75 drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)] select-none whitespace-normal ${
                         isLatin ? 'uppercase' : ''
                       } ${getWordStyle(isCurrent, isPast)}`}
                       style={{

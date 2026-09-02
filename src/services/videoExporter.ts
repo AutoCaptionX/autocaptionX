@@ -56,7 +56,7 @@ function findActivePhraseIndex(
     }
   }
 
-  return resultIdx;
+  return Math.min(phrases.length - 1, Math.max(0, resultIdx));
 }
 
 // Export 100% Full-Length Burned-In Captioned Video
@@ -335,7 +335,7 @@ export async function renderCaptionedVideo(
   });
 }
 
-// Helper to draw styled subtitle presets directly onto the video canvas
+// Helper to draw styled subtitle presets directly onto the video canvas with multi-line wrap
 function renderSubtitlesOnCanvas(
   ctx: CanvasRenderingContext2D,
   phrase: { words: CaptionWord[]; start: number; end: number },
@@ -344,10 +344,12 @@ function renderSubtitlesOnCanvas(
   width: number,
   height: number
 ) {
+  if (!phrase || !phrase.words || phrase.words.length === 0) return;
+
   ctx.save();
 
   const isVertical = height > width;
-  const baseFontSize = isVertical ? Math.round(width * 0.062) : Math.round(height * 0.072);
+  const baseFontSize = isVertical ? Math.max(26, Math.round(width * 0.058)) : Math.max(24, Math.round(height * 0.068));
   const posY = isVertical ? height * 0.78 : height * 0.82;
 
   // Active word index
@@ -384,7 +386,10 @@ function renderSubtitlesOnCanvas(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  // Calculate total phrase line width
+  const spacing = isVertical ? Math.round(width * 0.02) : Math.round(width * 0.015);
+  const maxLineWidth = width * 0.82;
+
+  // Measure all words with styles
   const wordMetrics = phrase.words.map((w, idx) => {
     const text = w.text;
     const isCurrent = idx === activeWordIdx;
@@ -394,107 +399,135 @@ function renderSubtitlesOnCanvas(
     return { text, textWidth, fontSize, isCurrent, idx };
   });
 
-  const spacing = isVertical ? Math.round(width * 0.02) : Math.round(width * 0.015);
-  const totalPhraseWidth =
-    wordMetrics.reduce((sum, item) => sum + item.textWidth, 0) + (wordMetrics.length - 1) * spacing;
+  // Split words into lines if needed so they never push off screen
+  const lines: Array<typeof wordMetrics> = [];
+  let currentLine: typeof wordMetrics = [];
+  let currentLineWidth = 0;
 
-  // Draw Subtitle Background Pill
-  const paddingX = Math.round(baseFontSize * 0.9);
-  const pillWidth = totalPhraseWidth + paddingX * 2;
-  const pillHeight = baseFontSize * 1.8;
+  for (const item of wordMetrics) {
+    const itemTotal = item.textWidth + (currentLine.length > 0 ? spacing : 0);
+    if (currentLine.length > 0 && currentLineWidth + itemTotal > maxLineWidth) {
+      lines.push(currentLine);
+      currentLine = [item];
+      currentLineWidth = item.textWidth;
+    } else {
+      currentLine.push(item);
+      currentLineWidth += itemTotal;
+    }
+  }
+  if (currentLine.length > 0) {
+    lines.push(currentLine);
+  }
+
+  // Calculate pill dimensions covering all lines
+  const lineHeight = Math.round(baseFontSize * 1.45);
+  const totalContentHeight = lines.length * lineHeight;
+  const maxLineW = Math.max(...lines.map((l) => l.reduce((s, w) => s + w.textWidth, 0) + (l.length - 1) * spacing));
+
+  const paddingX = Math.round(baseFontSize * 0.85);
+  const paddingY = Math.round(baseFontSize * 0.45);
+  const pillWidth = maxLineW + paddingX * 2;
+  const pillHeight = totalContentHeight + paddingY * 2;
   const pillX = (width - pillWidth) / 2;
   const pillY = posY - pillHeight / 2;
-  const borderRadius = Math.round(baseFontSize * 0.4);
+  const borderRadius = Math.round(baseFontSize * 0.35);
 
   // Background Box
   ctx.beginPath();
   ctx.roundRect(pillX, pillY, pillWidth, pillHeight, borderRadius);
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.88)';
   ctx.fill();
   ctx.lineWidth = Math.max(1.5, Math.round(baseFontSize * 0.04));
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
   ctx.stroke();
 
-  // Draw individual words with preset themes
-  let curX = (width - totalPhraseWidth) / 2;
+  // Draw lines
+  let startLineY = pillY + paddingY + lineHeight / 2;
 
-  wordMetrics.forEach((w) => {
-    const wordCenterX = curX + w.textWidth / 2;
-    ctx.font = `900 ${w.fontSize}px ${fontFamily}`;
+  lines.forEach((lineWords) => {
+    const lineWidth = lineWords.reduce((s, w) => s + w.textWidth, 0) + (lineWords.length - 1) * spacing;
+    let curX = (width - lineWidth) / 2;
 
-    if (preset === 'hormozi') {
-      if (w.isCurrent) {
-        // Glowing Active Box
-        const hlPaddingX = Math.round(w.fontSize * 0.25);
-        const hlPaddingY = Math.round(w.fontSize * 0.15);
-        const hlW = w.textWidth + hlPaddingX * 2;
-        const hlH = w.fontSize * 1.35;
-        const hlX = curX - hlPaddingX;
-        const hlY = posY - hlH / 2;
+    lineWords.forEach((w) => {
+      const wordCenterX = curX + w.textWidth / 2;
+      ctx.font = `900 ${w.fontSize}px ${fontFamily}`;
 
-        ctx.beginPath();
-        ctx.roundRect(hlX, hlY, hlW, hlH, Math.round(w.fontSize * 0.2));
-        ctx.fillStyle = 'rgba(234, 179, 8, 0.35)';
-        ctx.fill();
+      if (preset === 'hormozi') {
+        if (w.isCurrent) {
+          // Glowing Active Box
+          const hlPaddingX = Math.round(w.fontSize * 0.22);
+          const hlPaddingY = Math.round(w.fontSize * 0.12);
+          const hlW = w.textWidth + hlPaddingX * 2;
+          const hlH = w.fontSize * 1.3;
+          const hlX = curX - hlPaddingX;
+          const hlY = startLineY - hlH / 2;
 
-        // Active Word (Bright Yellow)
-        ctx.fillStyle = '#fde047';
-        ctx.shadowColor = 'rgba(234, 179, 8, 0.8)';
-        ctx.shadowBlur = Math.round(w.fontSize * 0.3);
+          ctx.beginPath();
+          ctx.roundRect(hlX, hlY, hlW, hlH, Math.round(w.fontSize * 0.2));
+          ctx.fillStyle = 'rgba(234, 179, 8, 0.35)';
+          ctx.fill();
+
+          // Active Word (Bright Yellow)
+          ctx.fillStyle = '#fde047';
+          ctx.shadowColor = 'rgba(234, 179, 8, 0.85)';
+          ctx.shadowBlur = Math.round(w.fontSize * 0.3);
+        } else {
+          ctx.fillStyle = '#ffffff';
+          ctx.shadowColor = 'transparent';
+          ctx.shadowBlur = 0;
+        }
+        ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
+        ctx.strokeStyle = '#000000';
+        ctx.strokeText(w.text, wordCenterX, startLineY);
+        ctx.fillText(w.text, wordCenterX, startLineY);
+
+      } else if (preset === 'neon') {
+        if (w.isCurrent) {
+          ctx.fillStyle = '#67e8f9';
+          ctx.shadowColor = 'rgba(34, 211, 238, 0.95)';
+          ctx.shadowBlur = Math.round(w.fontSize * 0.4);
+        } else {
+          ctx.fillStyle = '#ffffff';
+          ctx.shadowColor = 'transparent';
+          ctx.shadowBlur = 0;
+        }
+        ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
+        ctx.strokeStyle = '#000000';
+        ctx.strokeText(w.text, wordCenterX, startLineY);
+        ctx.fillText(w.text, wordCenterX, startLineY);
+
+      } else if (preset === 'beast') {
+        if (w.isCurrent) {
+          ctx.fillStyle = '#4ade80';
+          ctx.shadowColor = 'rgba(74, 222, 128, 0.9)';
+          ctx.shadowBlur = Math.round(w.fontSize * 0.35);
+        } else {
+          ctx.fillStyle = '#ffffff';
+          ctx.shadowColor = 'transparent';
+          ctx.shadowBlur = 0;
+        }
+        ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
+        ctx.strokeStyle = '#000000';
+        ctx.strokeText(w.text, wordCenterX, startLineY);
+        ctx.fillText(w.text, wordCenterX, startLineY);
+
       } else {
-        ctx.fillStyle = '#ffffff';
-        ctx.shadowColor = 'transparent';
-        ctx.shadowBlur = 0;
+        // Clean Preset
+        if (w.isCurrent) {
+          ctx.fillStyle = '#38bdf8';
+        } else {
+          ctx.fillStyle = '#ffffff';
+        }
+        ctx.lineWidth = Math.max(1.5, Math.round(w.fontSize * 0.05));
+        ctx.strokeStyle = '#000000';
+        ctx.strokeText(w.text, wordCenterX, startLineY);
+        ctx.fillText(w.text, wordCenterX, startLineY);
       }
-      ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
-      ctx.strokeStyle = '#000000';
-      ctx.strokeText(w.text, wordCenterX, posY);
-      ctx.fillText(w.text, wordCenterX, posY);
 
-    } else if (preset === 'neon') {
-      if (w.isCurrent) {
-        ctx.fillStyle = '#67e8f9';
-        ctx.shadowColor = 'rgba(34, 211, 238, 0.95)';
-        ctx.shadowBlur = Math.round(w.fontSize * 0.4);
-      } else {
-        ctx.fillStyle = '#ffffff';
-        ctx.shadowColor = 'transparent';
-        ctx.shadowBlur = 0;
-      }
-      ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
-      ctx.strokeStyle = '#000000';
-      ctx.strokeText(w.text, wordCenterX, posY);
-      ctx.fillText(w.text, wordCenterX, posY);
+      curX += w.textWidth + spacing;
+    });
 
-    } else if (preset === 'beast') {
-      if (w.isCurrent) {
-        ctx.fillStyle = '#4ade80';
-        ctx.shadowColor = 'rgba(74, 222, 128, 0.9)';
-        ctx.shadowBlur = Math.round(w.fontSize * 0.35);
-      } else {
-        ctx.fillStyle = '#ffffff';
-        ctx.shadowColor = 'transparent';
-        ctx.shadowBlur = 0;
-      }
-      ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
-      ctx.strokeStyle = '#000000';
-      ctx.strokeText(w.text, wordCenterX, posY);
-      ctx.fillText(w.text, wordCenterX, posY);
-
-    } else {
-      // Clean Preset
-      if (w.isCurrent) {
-        ctx.fillStyle = '#38bdf8';
-      } else {
-        ctx.fillStyle = '#ffffff';
-      }
-      ctx.lineWidth = Math.max(1.5, Math.round(w.fontSize * 0.05));
-      ctx.strokeStyle = '#000000';
-      ctx.strokeText(w.text, wordCenterX, posY);
-      ctx.fillText(w.text, wordCenterX, posY);
-    }
-
-    curX += w.textWidth + spacing;
+    startLineY += lineHeight;
   });
 
   ctx.restore();

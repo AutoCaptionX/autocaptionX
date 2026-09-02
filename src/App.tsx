@@ -18,11 +18,17 @@ import {
   checkRedirectLogin,
   type AppUser 
 } from './lib/authService';
-import { transcribeDirectAssemblyAI, translateHindiWordsToEnglish, polishCaptionWords } from './services/transcription';
+import { 
+  transcribeDirectAssemblyAI, 
+  transcribeAudioChunksStream,
+  translateHindiWordsToEnglish, 
+  polishCaptionWords 
+} from './services/transcription';
 import { transcribeWithBrowserSpeech } from './services/browserSpeechTranscriber';
 import { renderCaptionedVideo, generateSrtContent } from './services/videoExporter';
 import { generateWebVTT } from './utils/captionConverters';
 import { downloadOrSaveVideoFile } from './utils/fileDownloader';
+import { ExportPreviewModal } from './components/ExportPreviewModal';
 import type { VideoResolution, CaptionWord, CaptionJobData, CaptionPreset, CaptionLanguageMode } from './types';
 
 const DEFAULT_ASSEMBLY_KEY = '75c993a46b784bc4a66e8481b5c4812f';
@@ -44,6 +50,7 @@ export default function App() {
   // Generation & Timeline State
   const [isGenerating, setIsGenerating] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [generationStatusText, setGenerationStatusText] = useState('');
   const [words, setWords] = useState<CaptionWord[]>([]);
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
   const [seekTimeMs, setSeekTimeMs] = useState<number | null>(null);
@@ -54,6 +61,9 @@ export default function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStatusText, setExportStatusText] = useState('');
+  const [exportedVideoBlob, setExportedVideoBlob] = useState<Blob | null>(null);
+  const [exportedFileName, setExportedFileName] = useState<string>('');
+  const [isExportPreviewOpen, setIsExportPreviewOpen] = useState(false);
 
   // Universal Auth State Listener (Syncs Firebase + LocalStorage Auth)
   useEffect(() => {
@@ -185,101 +195,73 @@ export default function App() {
     setIsExporting(false);
   };
 
-  // Generate Captions via AssemblyAI & Gemini Translation
+  // Generate Captions via Streaming Audio Chunking (Up to 30 mins) & Gemini Translation
   const handleGenerate = async () => {
     if (!selectedFile) return;
 
     setIsGenerating(true);
-    setProgress(10);
+    setProgress(5);
+    setGenerationStatusText('Splitting audio into streaming segments...');
     setWords([]); // Clear previous words immediately
 
     const activeKey = localStorage.getItem('autocaption_assembly_key')?.trim() || DEFAULT_ASSEMBLY_KEY;
 
-    // Get video duration if available
-    let videoDurationMs = 15000;
-    try {
-      if (videoBlobUrl) {
-        const tempVid = document.createElement('video');
-        tempVid.src = videoBlobUrl;
-        await new Promise((resolve) => {
-          tempVid.onloadedmetadata = () => {
-            if (isFinite(tempVid.duration) && tempVid.duration > 0) {
-              videoDurationMs = Math.round(tempVid.duration * 1000);
-            }
-            resolve(true);
-          };
-          tempVid.onerror = () => resolve(false);
-          setTimeout(() => resolve(false), 1500);
-        });
-        tempVid.remove();
-      }
-    } catch (e) {}
-
     try {
       let data: any = null;
 
-      // 1. Try Backend Express endpoint if running on full-stack server
+      // 1. Streaming Audio Chunking Engine (Processes 6-10s segments sequentially in async background loop)
       try {
-        const formData = new FormData();
-        formData.append('file', selectedFile);
-        formData.append('languageMode', languageMode);
-        formData.append('durationMs', String(videoDurationMs));
-
-        const headers: Record<string, string> = {};
-        if (activeKey) {
-          headers['x-assemblyai-key'] = activeKey;
-        }
-
-        const response = await fetch('/api/captions/transcribe', {
-          method: 'POST',
-          headers: Object.keys(headers).length > 0 ? headers : undefined,
-          body: formData,
-        });
-
-        if (response.ok) {
-          const responseText = await response.text();
-          try {
-            data = JSON.parse(responseText);
-          } catch (jsonErr) {
-            console.warn('Non-JSON response from server, falling back to direct client API');
+        const streamResult = await transcribeAudioChunksStream(
+          selectedFile,
+          activeKey,
+          languageMode,
+          (curProgress, statusText) => {
+            setProgress(curProgress);
+            if (statusText) setGenerationStatusText(statusText);
           }
-        }
-      } catch (backendErr) {
-        console.log('Backend /api/captions/transcribe not reachable (Running statically on GitHub Pages)');
-      }
+        );
+        data = streamResult;
+      } catch (streamErr: any) {
+        console.warn('Streaming chunk transcription notice:', streamErr?.message || streamErr);
 
-      // 2. Client-side direct AssemblyAI fallback with Audio Extraction & Multi-Key Failover
-      if (!data || !data.words || data.words.length === 0) {
-        console.log('Executing high-speed client-side direct transcription with audio extraction...');
+        // 2. Direct Fallback
         try {
+          setGenerationStatusText('Analyzing full audio track...');
           const directResult = await transcribeDirectAssemblyAI(
             selectedFile,
             activeKey,
             languageMode,
-            (curProgress) => setProgress(curProgress)
+            (curProgress) => {
+              setProgress(curProgress);
+              setGenerationStatusText(`Transcribing... ${curProgress}%`);
+            }
           );
           data = directResult;
         } catch (directErr: any) {
-          console.warn('Direct AssemblyAI notice:', directErr.message);
-          
+          console.warn('Direct AssemblyAI notice:', directErr?.message || directErr);
+
           // 3. Fallback to Browser Speech Recognition API
           if (videoBlobUrl) {
             try {
-              console.log('Attempting browser speech recognition engine fallback...');
+              setGenerationStatusText('Using browser speech recognition...');
               const browserResult = await transcribeWithBrowserSpeech(
                 videoBlobUrl,
                 languageMode,
-                (curProgress) => setProgress(curProgress)
+                (curProgress) => {
+                  setProgress(curProgress);
+                  setGenerationStatusText(`Transcribing... ${curProgress}%`);
+                }
               );
               data = browserResult;
             } catch (speechErr: any) {
-              console.warn('Browser speech recognition fallback notice:', speechErr.message);
+              console.warn('Browser speech recognition fallback notice:', speechErr?.message || speechErr);
             }
           }
         }
       }
 
       setProgress(100);
+      setGenerationStatusText('Captions ready!');
 
       const hasValidData = data && data.words && Array.isArray(data.words) && data.words.length > 0;
       let rawGeneratedWords: CaptionWord[] = hasValidData ? data.words : [];
@@ -295,7 +277,9 @@ export default function App() {
       setWords(rawGeneratedWords);
       setHasGenerated(true);
 
-      const providerLabel = data?.source?.includes('assemblyai')
+      const providerLabel = data?.source?.includes('chunk') || data?.source?.includes('stream')
+        ? 'Streaming Audio Chunk Engine (Full Timeline Sync)'
+        : data?.source?.includes('assemblyai')
         ? 'AssemblyAI (Word-Level Sync)'
         : data?.source?.includes('browser')
         ? 'Browser Speech Recognition'
@@ -337,6 +321,8 @@ export default function App() {
       showToast(`Notice: ${err.message || 'Processing captions'}`);
     } finally {
       setIsGenerating(false);
+      setProgress(0);
+      setGenerationStatusText('');
     }
   };
 
@@ -369,6 +355,10 @@ export default function App() {
       const ext = renderedBlob.type.includes('webm') ? 'webm' : 'mp4';
       const fileName = `captioned_${baseName}_${selectedResolution}.${ext}`;
 
+      setExportedVideoBlob(renderedBlob);
+      setExportedFileName(fileName);
+      setIsExportPreviewOpen(true);
+
       const res = await downloadOrSaveVideoFile(renderedBlob, fileName, (notice) => {
         setExportStatusText(notice);
       });
@@ -381,6 +371,9 @@ export default function App() {
         const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
         const response = await fetch(videoBlobUrl);
         const sourceBlob = await response.blob();
+        setExportedVideoBlob(sourceBlob);
+        setExportedFileName(`captioned_${baseName}_${selectedResolution}.mp4`);
+        setIsExportPreviewOpen(true);
         await downloadOrSaveVideoFile(sourceBlob, `captioned_${baseName}_${selectedResolution}.mp4`);
       } catch (e) {
         const anchor = document.createElement('a');
@@ -521,6 +514,7 @@ export default function App() {
           hasVideo={Boolean(selectedFile)}
           isGenerating={isGenerating}
           progress={progress}
+          generationStatusText={generationStatusText}
           hasGeneratedCaptions={hasGenerated}
           selectedResolution={selectedResolution}
           isExporting={isExporting}
@@ -565,6 +559,15 @@ export default function App() {
             showToast('AssemblyAI speech recognition activated!');
           }
         }}
+      />
+
+      <ExportPreviewModal
+        isOpen={isExportPreviewOpen}
+        onClose={() => setIsExportPreviewOpen(false)}
+        renderedVideoBlob={exportedVideoBlob}
+        fileName={exportedFileName}
+        resolution={selectedResolution}
+        onDownloadSrt={handleDownloadSrt}
       />
     </div>
   );

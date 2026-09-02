@@ -226,26 +226,34 @@ export async function renderCaptionedVideo(
       }
       flushGroup();
 
-      // 4. Setup MediaRecorder with best supported mimeType
+      // 4. Setup MediaRecorder with best supported lightweight mobile mimeType
       const mimeTypes = [
-        'video/mp4;codecs=avc1,mp4a.40.2',
         'video/mp4',
-        'video/webm;codecs=vp9,opus',
+        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+        'video/mp4;codecs=avc1,mp4a.40.2',
         'video/webm;codecs=vp8,opus',
+        'video/webm;codecs=vp8',
+        'video/webm;codecs=vp9,opus',
         'video/webm',
       ];
       let selectedMimeType = '';
       for (const t of mimeTypes) {
-        if (MediaRecorder.isTypeSupported(t)) {
+        if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) {
           selectedMimeType = t;
           break;
         }
       }
 
-      const recorder = new MediaRecorder(stream, {
-        mimeType: selectedMimeType || undefined,
-        videoBitsPerSecond: resolution === '4k' ? 12000000 : resolution === '1080p' ? 6000000 : 3000000,
-      });
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(stream, {
+          mimeType: selectedMimeType || undefined,
+          videoBitsPerSecond: resolution === '4k' ? 8000000 : resolution === '1080p' ? 4500000 : 2500000,
+        });
+      } catch (recInitErr) {
+        console.warn('Initial MediaRecorder config failed, using basic fallback recorder:', recInitErr);
+        recorder = new MediaRecorder(stream);
+      }
 
       const recordedChunks: Blob[] = [];
       recorder.ondataavailable = (e) => {

@@ -6,6 +6,7 @@ interface ActionControlsProps {
   hasVideo: boolean;
   isGenerating: boolean;
   progress: number;
+  generationStatusText?: string;
   hasGeneratedCaptions: boolean;
   selectedResolution: VideoResolution;
   isExporting?: boolean;
@@ -22,6 +23,7 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
   hasVideo,
   isGenerating,
   progress,
+  generationStatusText = '',
   hasGeneratedCaptions,
   selectedResolution,
   isExporting = false,
@@ -54,7 +56,7 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
           <div className="flex items-center justify-between text-xs font-medium text-slate-300">
             <span className="flex items-center gap-2 text-blue-400 font-semibold">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              Transcribing & syncing word timestamps...
+              {generationStatusText || `Transcribing... ${progress}%`}
             </span>
             <span className="font-mono font-bold text-blue-400">{progress}%</span>
           </div>

@@ -187,8 +187,121 @@ export function sanitizeAndEnforceMonotonic(words: CaptionWord[]): CaptionWord[]
   return result;
 }
 
+export interface AudioChunkSegment {
+  index: number;
+  totalChunks: number;
+  startOffsetMs: number;
+  endOffsetMs: number;
+  durationMs: number;
+  blob: Blob;
+  audioBuffer?: AudioBuffer;
+}
+
+// Slice AudioBuffer between specific start and end timestamps in milliseconds
+export function sliceAudioBuffer(
+  audioBuffer: AudioBuffer,
+  startMs: number,
+  endMs: number
+): AudioBuffer | null {
+  try {
+    const sampleRate = audioBuffer.sampleRate;
+    const startSample = Math.max(0, Math.floor((startMs / 1000) * sampleRate));
+    const endSample = Math.min(audioBuffer.length, Math.ceil((endMs / 1000) * sampleRate));
+    const sliceLength = endSample - startSample;
+
+    if (sliceLength <= 0) return null;
+
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return null;
+
+    const audioCtx = new AudioContextClass({ sampleRate });
+    const slicedBuffer = audioCtx.createBuffer(
+      audioBuffer.numberOfChannels,
+      sliceLength,
+      sampleRate
+    );
+
+    for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
+      const channelData = audioBuffer.getChannelData(c);
+      const subData = channelData.subarray(startSample, endSample);
+      slicedBuffer.copyToChannel(subData, c, 0);
+    }
+
+    return slicedBuffer;
+  } catch (err) {
+    console.warn('[AutoCaptionX Audio] sliceAudioBuffer notice:', err);
+    return null;
+  }
+}
+
+// Split media file audio into small 6-10 second streaming chunks for long video processing (up to 30 mins)
+export async function splitMediaFileIntoAudioChunks(
+  file: File | Blob,
+  chunkDurationMs = 8000
+): Promise<AudioChunkSegment[]> {
+  try {
+    const decodedAudio = await decodeAudioBufferFromFile(file);
+    if (!decodedAudio || decodedAudio.duration <= 0) {
+      // Fallback to single chunk if audio cannot be decoded via Web Audio API
+      return [
+        {
+          index: 0,
+          totalChunks: 1,
+          startOffsetMs: 0,
+          endOffsetMs: 10000,
+          durationMs: 10000,
+          blob: file,
+        },
+      ];
+    }
+
+    const totalDurationMs = Math.round(decodedAudio.duration * 1000);
+    const numChunks = Math.max(1, Math.ceil(totalDurationMs / chunkDurationMs));
+    const chunks: AudioChunkSegment[] = [];
+
+    for (let i = 0; i < numChunks; i++) {
+      const startOffsetMs = i * chunkDurationMs;
+      const endOffsetMs = Math.min(totalDurationMs, (i + 1) * chunkDurationMs);
+      const durationMs = endOffsetMs - startOffsetMs;
+
+      const slicedBuffer = sliceAudioBuffer(decodedAudio, startOffsetMs, endOffsetMs);
+      let chunkBlob: Blob;
+
+      if (slicedBuffer) {
+        chunkBlob = audioBufferToWav(slicedBuffer, 16000);
+      } else {
+        chunkBlob = file;
+      }
+
+      chunks.push({
+        index: i,
+        totalChunks: numChunks,
+        startOffsetMs,
+        endOffsetMs,
+        durationMs,
+        blob: chunkBlob,
+        audioBuffer: slicedBuffer || undefined,
+      });
+    }
+
+    return chunks;
+  } catch (err) {
+    console.warn('[AutoCaptionX Audio] Audio chunking fallback to single segment:', err);
+    return [
+      {
+        index: 0,
+        totalChunks: 1,
+        startOffsetMs: 0,
+        endOffsetMs: 10000,
+        durationMs: 10000,
+        blob: file,
+      },
+    ];
+  }
+}
+
 // Convert AudioBuffer to standard 16-bit PCM WAV Blob
-function audioBufferToWav(audioBuffer: AudioBuffer, targetSampleRate = 16000): Blob {
+export function audioBufferToWav(audioBuffer: AudioBuffer, targetSampleRate = 16000): Blob {
   const numChannels = 1; // Mono
   const sampleRate = targetSampleRate;
   const format = 1; // PCM

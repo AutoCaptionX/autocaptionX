@@ -544,6 +544,7 @@ app.post('/api/captions/transcribe', (req, res) => {
       3000,
       Number(req.body.durationMs || req.body.videoDurationMs) || 12000
     );
+    const startOffsetMs = Math.max(0, Number(req.body.startOffsetMs) || 0);
 
     if (uploadErr) {
       console.warn('Multer upload warning:', uploadErr.message);
@@ -772,8 +773,8 @@ Return a JSON object strictly matching:
               const cleanWords = parsed.words
                 .map((w: any) => ({
                   text: String(w.text || '').trim(),
-                  start: Math.max(0, Math.round(Number(w.start) || 0)),
-                  end: Math.max(Math.round(Number(w.start) || 0) + 80, Math.round(Number(w.end) || 0)),
+                  start: Math.max(0, Math.round(Number(w.start) || 0) + startOffsetMs),
+                  end: Math.max(Math.round(Number(w.start) || 0) + startOffsetMs + 80, Math.round(Number(w.end) || 0) + startOffsetMs),
                   confidence: 0.99,
                 }))
                 .filter((w: any) => w.text.length > 0);

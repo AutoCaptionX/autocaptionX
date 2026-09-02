@@ -8,104 +8,62 @@ export interface SaveFileResult {
 
 export async function downloadOrSaveVideoFile(
   blob: Blob,
-  fileName: string,
+  fileName?: string,
   onNotice?: (msg: string) => void
 ): Promise<SaveFileResult> {
   const isMobile = /iPhone|iPad|iPod|Android|Mobile|Tablet/i.test(navigator.userAgent || navigator.vendor || '');
   const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent || navigator.vendor || '');
   const isAndroid = /Android/i.test(navigator.userAgent || navigator.vendor || '');
 
+  const safeFileName = fileName && fileName.trim().length > 0 
+    ? fileName 
+    : `AutoCaptionX_${Date.now()}.mp4`;
+
   // Ensure standard MIME type for video
   const mimeType = blob.type && blob.type.includes('video') ? blob.type : 'video/mp4';
   const cleanBlob = new Blob([blob], { type: mimeType });
   const objectUrl = URL.createObjectURL(cleanBlob);
 
-  // 1. Direct Browser Download via Link Element (Triggers Android Download Manager & Desktop Browser Downloads)
+  // 1. Trigger DOM Anchor Download
   try {
-    const link = document.createElement('a');
-    link.style.position = 'fixed';
-    link.style.top = '-9999px';
-    link.style.left = '-9999px';
-    link.style.opacity = '0';
-    link.href = objectUrl;
-    link.download = fileName;
-    link.setAttribute('download', fileName);
-    link.target = '_self';
-    link.rel = 'noopener noreferrer';
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = objectUrl;
+    a.download = safeFileName;
+    a.setAttribute('download', safeFileName);
+    a.rel = 'noopener noreferrer';
 
-    document.body.appendChild(link);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 
-    // Synthetic click
-    if (typeof MouseEvent !== 'undefined') {
-      const clickEvt = new MouseEvent('click', {
-        view: window,
-        bubbles: true,
-        cancelable: true,
-      });
-      link.dispatchEvent(clickEvt);
-    } else {
-      link.click();
-    }
-
+    // Keep ObjectURL alive for 15 seconds so Android Download Manager finishes saving to Gallery/Downloads
     setTimeout(() => {
-      if (document.body.contains(link)) {
-        document.body.removeChild(link);
-      }
-    }, 2000);
-
-    // 2. On iOS or Android devices, also attempt Web Share API if available to enable "Save Video to Gallery / Photos"
-    if (isMobile && typeof navigator !== 'undefined' && navigator.share && navigator.canShare) {
       try {
-        const file = new File([cleanBlob], fileName, { type: mimeType, lastModified: Date.now() });
-        if (navigator.canShare({ files: [file] })) {
-          onNotice?.('Opening Gallery save dialog...');
-          await navigator.share({
-            files: [file],
-            title: 'AutoCaptionX Video',
-            text: 'Captioned video ready for Gallery / Instagram / YouTube',
-          });
-          return {
-            success: true,
-            method: 'share-api',
-            message: isIOS
-              ? 'Saved to Apple Photos / Camera Roll!'
-              : 'Saved to Gallery & Downloads folder!',
-            blobUrl: objectUrl,
-          };
-        }
-      } catch (shareErr: any) {
-        if (shareErr.name === 'AbortError') {
-          return {
-            success: true,
-            method: 'direct-download',
-            message: 'Video downloaded to your device Downloads folder!',
-            blobUrl: objectUrl,
-          };
-        }
-        console.warn('Native share sheet notice:', shareErr);
-      }
-    }
+        URL.revokeObjectURL(objectUrl);
+      } catch (e) {}
+    }, 15000);
 
     return {
       success: true,
       method: 'direct-download',
       message: isAndroid
-        ? 'Video saved to your phone Downloads & Gallery!'
+        ? 'Video download started! Saving directly to Phone Gallery & Downloads.'
         : isIOS
-        ? 'Video downloaded! Tap Files or Photos to view.'
-        : 'Captioned video downloaded to your computer!',
+        ? 'Video downloaded! Tap to open and save to Camera Roll.'
+        : 'Captioned video downloaded successfully!',
       blobUrl: objectUrl,
     };
   } catch (err: any) {
-    console.error('Direct download error:', err);
+    console.error('Direct DOM download error:', err);
 
-    // Fallback: Open in new tab so user can Long Press -> Save Video
+    // Fallback: Open in new window/tab so user can long-press to save
     try {
       window.open(objectUrl, '_blank');
       return {
         success: true,
         method: 'popup-fallback',
-        message: 'Video opened. Press and hold to "Save to Gallery".',
+        message: 'Video opened in preview tab. Long-press to save to phone.',
         blobUrl: objectUrl,
       };
     } catch (popupErr) {
@@ -113,3 +71,4 @@ export async function downloadOrSaveVideoFile(
     }
   }
 }
+

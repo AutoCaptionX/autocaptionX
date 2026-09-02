@@ -173,9 +173,46 @@ export const Footer: React.FC = () => {
           </ol>
         </section>
 
+        {/* Creator / Developer Profile Section */}
+        <div id="footer-creator-profile" className="pt-6 pb-2 border-t border-slate-800/80 flex flex-col items-center justify-center text-center">
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4 sm:gap-6 mb-3">
+            <div className="relative inline-block">
+              <img
+                src="https://i.ibb.co/R4zknTjT/IMG-20260825-152808.jpg"
+                alt="Creator & Developer Profile"
+                className="w-[120px] h-[120px] rounded-full object-cover border-2 border-indigo-500/60 shadow-lg shadow-indigo-950/40"
+                referrerPolicy="no-referrer"
+                onError={(e) => {
+                  // Fallback to local copy if network/CORS blocks external cdn
+                  e.currentTarget.src = '/creator_original.jpg';
+                }}
+              />
+            </div>
+            <div className="relative inline-block">
+              <img
+                src="https://i.ibb.co/Z1kLzPNK/IMG-20260825-155612.jpg"
+                data-page-url="https://ibb.co/WpYxvwsF"
+                alt="Creator Photo 2"
+                className="w-[120px] h-[120px] rounded-full object-cover border-2 border-indigo-500/60 shadow-lg shadow-indigo-950/40"
+                referrerPolicy="no-referrer"
+                onError={(e) => {
+                  // Fallback to local copy if network/CORS blocks external cdn
+                  e.currentTarget.src = '/creator_photo_2.jpg';
+                }}
+              />
+            </div>
+          </div>
+          <span className="text-sm font-semibold text-slate-200 tracking-wide">
+            Creator & Lead Developer
+          </span>
+          <p className="text-xs text-slate-400 mt-1">
+            Designed & Engineered with ❤️ in Simraungadh, Nepal
+          </p>
+        </div>
+
         {/* Bottom Bar */}
-        <div className="pt-6 text-center text-xs text-slate-500 border-t border-slate-900 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <p>© {new Date().getFullYear()} AutoCaptionX. All rights reserved.</p>
+        <div className="pt-4 text-center text-xs text-slate-500 border-t border-slate-900 flex flex-col sm:flex-row items-center justify-between gap-2">
+          <p>© 2026 AutoCaptionX. All rights reserved.</p>
           <p className="text-[11px]">Crafted for creators worldwide • Nepal (simraungadh)</p>
         </div>
 

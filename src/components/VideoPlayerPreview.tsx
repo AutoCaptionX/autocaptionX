@@ -1,6 +1,8 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { Sparkles, Play, Pause, Volume2, VolumeX, RotateCcw, Loader2 } from 'lucide-react';
 import type { CaptionWord, CaptionPreset } from '../types';
+import { buildContinuousCaptionPhrases, findActivePhraseIndex } from '../utils/captionConverters';
+import { sanitizeAndEnforceMonotonic } from '../utils/audioExtractor';
 
 interface VideoPlayerPreviewProps {
   videoUrl: string | null;
@@ -9,6 +11,7 @@ interface VideoPlayerPreviewProps {
   preset?: CaptionPreset;
   seekTimeMs?: number | null;
   onTimeUpdate?: (ms: number) => void;
+  onDurationChange?: (durationMs: number) => void;
 }
 
 export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
@@ -18,6 +21,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   preset = 'hormozi',
   seekTimeMs = null,
   onTimeUpdate,
+  onDurationChange,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoWrapperRef = useRef<HTMLDivElement>(null);
@@ -48,103 +52,40 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   const lastParentUpdateTimeRef = useRef(0);
   const lastActiveWordRef = useRef<{ phraseIndex: number; wordIdx: number } | null>(null);
 
-  // Sorted words with sanitized, monotonic, and validated timestamps
-  const sortedWords = useMemo(() => {
-    if (!words || words.length === 0) return [];
-    const valid = [...words]
-      .filter((w) => Boolean(w && w.text && w.text.trim()))
-      .map((w, idx) => {
-        const start = typeof w.start === 'number' && !isNaN(w.start) ? Math.max(0, Math.round(w.start)) : idx * 300;
-        const end = typeof w.end === 'number' && !isNaN(w.end) ? Math.max(start + 80, Math.round(w.end)) : start + 250;
-        return {
-          ...w,
-          text: w.text.trim(),
-          start,
-          end,
-        };
-      })
-      .sort((a, b) => a.start - b.start);
+  // Effective video duration in ms (handles metadata, durationchange, and video element duration)
+  const effectiveDurationMs = useMemo(() => {
+    if (durationMs > 0) return durationMs;
+    const v = videoRef.current;
+    if (v && v.duration && !isNaN(v.duration) && v.duration !== Infinity && v.duration > 0.1) {
+      return Math.round(v.duration * 1000);
+    }
+    return 0;
+  }, [durationMs]);
 
-    return valid;
-  }, [words]);
+  // Notify parent of accurate duration
+  useEffect(() => {
+    if (effectiveDurationMs > 0 && onDurationChange) {
+      onDurationChange(effectiveDurationMs);
+    }
+  }, [effectiveDurationMs, onDurationChange]);
 
-  // Group words into natural subtitle chunks (3-5 words) with exact continuous timeline coverage
+  // 2. AUTO-FILL SILENCE GAPS (HOLD CAPTION):
+  // - Modify word end times: Set effective endTime of each word to startTime of next word.
+  // - For the absolute last word of the video, set its endTime equal to video.duration
+  const synchronizedWords = useMemo(() => {
+    return sanitizeAndEnforceMonotonic(words, effectiveDurationMs);
+  }, [words, effectiveDurationMs]);
+
+  // Group words into continuous subtitle chunks spanning 100% video timeline with zero blank gaps
   const phrases = useMemo(() => {
-    if (!sortedWords || sortedWords.length === 0) return [];
-
-    const result: Array<{
-      id: number;
-      words: CaptionWord[];
-      start: number;
-      end: number;
-    }> = [];
-
-    let currentGroup: CaptionWord[] = [];
-
-    const flushGroup = () => {
-      if (currentGroup.length === 0) return;
-      const start = currentGroup[0].start;
-      const end = currentGroup[currentGroup.length - 1].end;
-      result.push({
-        id: result.length,
-        words: [...currentGroup],
-        start,
-        end,
-      });
-      currentGroup = [];
-    };
-
-    for (let i = 0; i < sortedWords.length; i++) {
-      const w = sortedWords[i];
-      const prevW = currentGroup[currentGroup.length - 1];
-
-      const hasPunctuation = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-      const isTimeGap = prevW && w.start - prevW.end > 500;
-      const isMaxWords = currentGroup.length >= 4;
-
-      if (currentGroup.length > 0 && (hasPunctuation || isTimeGap || isMaxWords)) {
-        flushGroup();
-      }
-
-      currentGroup.push(w);
-    }
-    flushGroup();
-
-    return result;
-  }, [sortedWords]);
-
-  // Precision O(log N) Binary Search for active subtitle phrase matching audio currentTime
-  // Automatically clears previous caption text immediately when currentTime > caption.endTime or during pauses
-  const findPhraseIndex = useCallback((curMs: number): number => {
-    if (!phrases || phrases.length === 0) return -1;
-    if (curMs < phrases[0].start - 40 || curMs > phrases[phrases.length - 1].end + 80) {
-      return -1;
-    }
-
-    let low = 0;
-    let high = phrases.length - 1;
-
-    while (low <= high) {
-      const mid = (low + high) >> 1;
-      const phrase = phrases[mid];
-
-      if (curMs >= phrase.start - 40 && curMs <= phrase.end + 80) {
-        return mid;
-      }
-
-      if (curMs < phrase.start - 40) {
-        high = mid - 1;
-      } else {
-        low = mid + 1;
-      }
-    }
-
-    return -1;
-  }, [phrases]);
+    return buildContinuousCaptionPhrases(synchronizedWords, effectiveDurationMs);
+  }, [synchronizedWords, effectiveDurationMs]);
 
   // Synchronize subtitle state for a given millisecond timestamp
+  // Guarantees persistence: holds each caption block until the next one begins,
+  // and holds the final caption block until the exact end of the video.
   const syncSubtitleForTime = useCallback((curMs: number) => {
-    if (!phrases || phrases.length === 0) {
+    if (!synchronizedWords || synchronizedWords.length === 0 || !phrases || phrases.length === 0) {
       if (lastActiveWordRef.current !== null) {
         lastActiveWordRef.current = null;
         setActiveSubtitle(null);
@@ -152,40 +93,69 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       return;
     }
 
-    const phraseIdx = findPhraseIndex(curMs);
-    if (phraseIdx !== -1 && phraseIdx < phrases.length) {
-      const currentPhrase = phrases[phraseIdx];
-      let wordIdx = 0;
-
-      // Exact millisecond match for the currently spoken word
-      for (let i = 0; i < currentPhrase.words.length; i++) {
-        const w = currentPhrase.words[i];
-        const nextW = currentPhrase.words[i + 1];
-        const wordEndBound = nextW ? nextW.start : w.end + 100;
-
-        if (curMs >= w.start && curMs < wordEndBound) {
-          wordIdx = i;
-          break;
-        } else if (curMs >= w.end) {
-          wordIdx = i;
-        }
-      }
-
-      const resolvedWordIdx = Math.max(0, Math.min(currentPhrase.words.length - 1, wordIdx));
-
-      const last = lastActiveWordRef.current;
-      if (!last || last.phraseIndex !== phraseIdx || last.wordIdx !== resolvedWordIdx) {
-        lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx: resolvedWordIdx };
-        setActiveSubtitle({ phraseIndex: phraseIdx, activeWordIdx: resolvedWordIdx });
-      }
-    } else {
-      // When currentTime > caption.endTime or during pauses, immediately clear previous text!
-      if (lastActiveWordRef.current !== null) {
-        lastActiveWordRef.current = null;
-        setActiveSubtitle(null);
+    // 1. VIDEO CURRENTTIME LISTENER SYNC:
+    // On every frame tick, filter AssemblyAI transcribed words array where
+    // word.start <= video.currentTime and word.end >= video.currentTime
+    let matchedWordIdx = -1;
+    for (let i = 0; i < synchronizedWords.length; i++) {
+      const w = synchronizedWords[i];
+      if (w.start <= curMs && w.end >= curMs) {
+        matchedWordIdx = i;
+        break;
       }
     }
-  }, [findPhraseIndex, phrases]);
+
+    // Boundary fallbacks if curMs is at start or end
+    if (matchedWordIdx === -1) {
+      if (curMs <= synchronizedWords[0].start) {
+        matchedWordIdx = 0;
+      } else {
+        matchedWordIdx = synchronizedWords.length - 1;
+      }
+    }
+    const matchedWord = synchronizedWords[matchedWordIdx];
+
+    // Find the active phrase containing this matched word or spanning curMs
+    let phraseIdx = phrases.findIndex((p) =>
+      p.words.some((pw) => pw === matchedWord || (pw.text === matchedWord.text && pw.start === matchedWord.start))
+    );
+    if (phraseIdx === -1) {
+      phraseIdx = findActivePhraseIndex(phrases, curMs);
+    }
+    phraseIdx = Math.max(0, Math.min(phrases.length - 1, phraseIdx !== -1 ? phraseIdx : 0));
+    const currentPhrase = phrases[phraseIdx];
+
+    // Find the word index within currentPhrase that matches curMs
+    let wordIdxInPhrase = currentPhrase.words.findIndex((pw) =>
+      pw === matchedWord || (pw.text === matchedWord.text && pw.start === matchedWord.start)
+    );
+    if (wordIdxInPhrase === -1) {
+      for (let j = 0; j < currentPhrase.words.length; j++) {
+        const pw = currentPhrase.words[j];
+        if (curMs >= pw.start && curMs <= pw.end) {
+          wordIdxInPhrase = j;
+          break;
+        } else if (curMs >= pw.end) {
+          wordIdxInPhrase = j;
+        }
+      }
+    }
+    wordIdxInPhrase = Math.max(0, Math.min(currentPhrase.words.length - 1, wordIdxInPhrase));
+
+    const last = lastActiveWordRef.current;
+    if (!last || last.phraseIndex !== phraseIdx || last.wordIdx !== wordIdxInPhrase) {
+      lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx: wordIdxInPhrase };
+      setActiveSubtitle({ phraseIndex: phraseIdx, activeWordIdx: wordIdxInPhrase });
+    }
+  }, [synchronizedWords, phrases]);
+
+  // Immediately sync subtitle state on mount, when phrases change, or when video loads
+  useEffect(() => {
+    if (phrases.length > 0 || words.length > 0) {
+      const curMs = videoRef.current ? Math.round(videoRef.current.currentTime * 1000) : 0;
+      syncSubtitleForTime(curMs);
+    }
+  }, [phrases, words, syncSubtitleForTime]);
 
   // Synchronize external seek (e.g. from timeline editor)
   useEffect(() => {
@@ -239,8 +209,10 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     };
 
     const handleLoadedMetadata = () => {
-      if (video.duration && !isNaN(video.duration) && video.duration !== Infinity) {
-        setDurationMs(Math.round(video.duration * 1000));
+      if (video.duration && !isNaN(video.duration) && video.duration !== Infinity && video.duration > 0.1) {
+        const durMs = Math.round(video.duration * 1000);
+        setDurationMs(durMs);
+        onDurationChange?.(durMs);
       }
       const vw = video.videoWidth || 0;
       const vh = video.videoHeight || 0;
@@ -413,6 +385,8 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 
   const currentActivePhrase = activeSubtitle !== null && phrases[activeSubtitle.phraseIndex]
     ? phrases[activeSubtitle.phraseIndex]
+    : phrases.length > 0
+    ? phrases[0]
     : null;
 
   return (

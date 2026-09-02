@@ -152,39 +152,51 @@ export function alignWordTimestampsWithAudio(
   }
 }
 
-// Helper to guarantee strictly non-decreasing, non-overlapping timestamps
-export function sanitizeAndEnforceMonotonic(words: CaptionWord[]): CaptionWord[] {
+// Helper to guarantee strictly non-decreasing, non-overlapping timestamps and continuous timeline coverage
+// AUTO-FILL SILENCE GAPS (HOLD CAPTION):
+// - Modify word end times: Set the effective endTime of each word/phrase to the startTime of the next word.
+// - For the absolute last word of the video, set its endTime equal to video.duration so the final caption remains visible until the last frame.
+export function sanitizeAndEnforceMonotonic(words: CaptionWord[], videoDurationMs?: number): CaptionWord[] {
   if (!words || words.length === 0) return [];
 
-  const result: CaptionWord[] = [];
+  const sorted = [...words]
+    .filter((w) => Boolean(w && w.text && w.text.trim()))
+    .map((w, idx) => {
+      const s = typeof w.start === 'number' && !isNaN(w.start) ? Math.max(0, Math.round(w.start)) : idx * 300;
+      const e = typeof w.end === 'number' && !isNaN(w.end) ? Math.max(s + 50, Math.round(w.end)) : s + 250;
+      return {
+        ...w,
+        text: (w.text || '').trim(),
+        start: s,
+        end: e,
+      };
+    })
+    .sort((a, b) => a.start - b.start);
 
-  for (let i = 0; i < words.length; i++) {
-    const raw = words[i];
-    let s = typeof raw.start === 'number' && !isNaN(raw.start) ? Math.max(0, Math.round(raw.start)) : i * 300;
-    let e = typeof raw.end === 'number' && !isNaN(raw.end) ? Math.max(s + 80, Math.round(raw.end)) : s + 250;
+  if (sorted.length === 0) return [];
 
-    const prev = result[result.length - 1];
-    if (prev) {
-      if (s < prev.start) {
-        s = prev.end + 10;
-      }
-      if (prev.end > s) {
-        prev.end = Math.max(prev.start + 60, s - 10);
-      }
-      if (e <= s) {
-        e = s + 150;
-      }
+  // Anchor first word at 0:00 so caption is immediately visible from start
+  sorted[0].start = 0;
+
+  // Auto-fill silence gaps (Hold Caption):
+  // Set the effective endTime of each word to the startTime of the next word
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (sorted[i + 1].start <= sorted[i].start) {
+      sorted[i + 1].start = sorted[i].start + 60;
     }
-
-    result.push({
-      ...raw,
-      text: (raw.text || '').trim(),
-      start: s,
-      end: e,
-    });
+    // Modify word end times: Set effective endTime to startTime of next word
+    sorted[i].end = sorted[i + 1].start;
   }
 
-  return result;
+  // For the absolute last word of the video, set its endTime equal to video.duration
+  // so the final caption remains visible until the last frame
+  const last = sorted[sorted.length - 1];
+  const targetEnd = videoDurationMs && videoDurationMs > last.start
+    ? Math.round(videoDurationMs)
+    : Math.max(last.end, last.start + 2500);
+  last.end = targetEnd;
+
+  return sorted;
 }
 
 export interface AudioChunkSegment {

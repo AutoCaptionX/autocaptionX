@@ -1,13 +1,19 @@
 import type { CaptionWord, CaptionPreset, VideoResolution } from '../types';
-import { generateSRT, generateWebVTT } from '../utils/captionConverters';
+import {
+  generateSRT,
+  generateWebVTT,
+  buildContinuousCaptionPhrases,
+  findActivePhraseIndex,
+} from '../utils/captionConverters';
+import { sanitizeAndEnforceMonotonic } from '../utils/audioExtractor';
 
 export interface RenderProgressCallback {
   (percentage: number, statusText: string): void;
 }
 
-// Generate SubRip (.srt) subtitles file with precision millisecond alignment
-export function generateSrtContent(words: CaptionWord[]): string {
-  return generateSRT(words);
+// Generate SubRip (.srt) subtitles file with precision millisecond alignment and duration extension
+export function generateSrtContent(words: CaptionWord[], videoDurationMs?: number): string {
+  return generateSRT(words, videoDurationMs);
 }
 
 // Helper to determine exact finite duration of any video blob or source
@@ -32,38 +38,6 @@ async function getAccurateVideoDuration(video: HTMLVideoElement): Promise<number
     // Seek to a large number to force browser to calculate true duration for webm/mp4 blobs
     video.currentTime = 1e6;
   });
-}
-
-// Fast O(log N) Binary Search for active subtitle phrase matching audio currentTime bounds
-// Automatically clears previous caption text immediately when currentTime > caption.endTime or during pauses
-function findActivePhraseIndex(
-  phrases: Array<{ words: CaptionWord[]; start: number; end: number }>,
-  curMs: number
-): number {
-  if (!phrases || phrases.length === 0) return -1;
-  if (curMs < phrases[0].start - 40 || curMs > phrases[phrases.length - 1].end + 80) {
-    return -1;
-  }
-
-  let low = 0;
-  let high = phrases.length - 1;
-
-  while (low <= high) {
-    const mid = (low + high) >> 1;
-    const phrase = phrases[mid];
-
-    if (curMs >= phrase.start - 40 && curMs <= phrase.end + 80) {
-      return mid;
-    }
-
-    if (curMs < phrase.start - 40) {
-      high = mid - 1;
-    } else {
-      low = mid + 1;
-    }
-  }
-
-  return -1;
 }
 
 // Export 100% Full-Length Burned-In Captioned Video
@@ -184,47 +158,12 @@ export async function renderCaptionedVideo(
         } catch (e) {}
       }
 
-      // 3. Group words into subtitle chunks with chronological order
-      const sortedWords = [...words]
-        .filter((w) => Boolean(w && w.text && w.text.trim()))
-        .map((w, idx) => ({
-          ...w,
-          start: typeof w.start === 'number' && !isNaN(w.start) ? Math.max(0, w.start) : idx * 300,
-          end: typeof w.end === 'number' && !isNaN(w.end) ? Math.max(w.start + 100, w.end) : (idx + 1) * 300,
-        }))
-        .sort((a, b) => a.start - b.start);
-      const phrases: Array<{
-        words: CaptionWord[];
-        start: number;
-        end: number;
-      }> = [];
-
-      let currentGroup: CaptionWord[] = [];
-      const flushGroup = () => {
-        if (currentGroup.length === 0) return;
-        const start = currentGroup[0].start;
-        const end = currentGroup[currentGroup.length - 1].end;
-        phrases.push({
-          words: [...currentGroup],
-          start,
-          end,
-        });
-        currentGroup = [];
-      };
-
-      for (let i = 0; i < sortedWords.length; i++) {
-        const w = sortedWords[i];
-        const prevW = currentGroup[currentGroup.length - 1];
-        const hasPunct = prevW && /[.!?,\u0964|\n]/.test(prevW.text);
-        const isTimeGap = prevW && w.start - prevW.end > 500;
-        const isMax = currentGroup.length >= 4;
-
-        if (currentGroup.length > 0 && (hasPunct || isTimeGap || isMax)) {
-          flushGroup();
-        }
-        currentGroup.push(w);
-      }
-      flushGroup();
+      // 3. AUTO-FILL SILENCE GAPS & HOLD CAPTIONS UNTIL VIDEO END:
+      // Modify word end times so effective endTime = startTime of next word,
+      // and last word endTime = video.duration
+      const totalDurationMs = Math.round(totalVideoDuration * 1000);
+      const synchronizedWords = sanitizeAndEnforceMonotonic(words, totalDurationMs);
+      const phrases = buildContinuousCaptionPhrases(synchronizedWords, totalDurationMs);
 
       // 4. Setup MediaRecorder with best supported lightweight mobile mimeType
       const mimeTypes = [
@@ -328,6 +267,12 @@ export async function renderCaptionedVideo(
       recorder.start(100);
       video.currentTime = 0;
 
+      video.ontimeupdate = () => {
+        if (!isCompleted) {
+          drawFrame();
+        }
+      };
+
       video.onended = () => {
         setTimeout(finishExport, 200);
       };
@@ -376,7 +321,7 @@ function renderSubtitlesOnCanvas(
   for (let i = 0; i < phrase.words.length; i++) {
     const w = phrase.words[i];
     const nextW = phrase.words[i + 1];
-    const wordEndBound = nextW ? nextW.start : w.end + 150;
+    const wordEndBound = nextW ? nextW.start : w.end;
 
     if (curMs >= w.start && curMs < wordEndBound) {
       activeWordIdx = i;

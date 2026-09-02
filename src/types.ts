@@ -1,5 +1,5 @@
 export type VideoResolution = '720p' | '1080p' | '4k';
-export type CaptionLanguageMode = 'translate-en' | 'original' | 'romanized-hinglish';
+export type CaptionLanguageMode = 'translate-en' | 'original' | 'hindi' | 'romanized-hinglish';
 
 export interface CaptionWord {
   text: string;

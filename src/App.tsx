@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { AlertTriangle } from 'lucide-react';
 import { Header } from './components/Header';
 import { VideoUploader } from './components/VideoUploader';
 import { VideoPlayerPreview } from './components/VideoPlayerPreview';
@@ -27,6 +28,7 @@ import {
 import { transcribeWithBrowserSpeech } from './services/browserSpeechTranscriber';
 import { renderCaptionedVideo, generateSrtContent } from './services/videoExporter';
 import { generateWebVTT } from './utils/captionConverters';
+import { sanitizeAndEnforceMonotonic } from './utils/audioExtractor';
 import { downloadOrSaveVideoFile } from './utils/fileDownloader';
 import { ExportPreviewModal } from './components/ExportPreviewModal';
 import type { VideoResolution, CaptionWord, CaptionJobData, CaptionPreset, CaptionLanguageMode } from './types';
@@ -43,9 +45,11 @@ export default function App() {
   // Video State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [videoBlobUrl, setVideoBlobUrl] = useState<string | null>(null);
+  const [videoDurationMs, setVideoDurationMs] = useState<number>(0);
   const [selectedResolution, setSelectedResolution] = useState<VideoResolution>('4k');
   const [captionPreset, setCaptionPreset] = useState<CaptionPreset>('hormozi');
   const [languageMode, setLanguageMode] = useState<CaptionLanguageMode>('translate-en');
+  const [alertError, setAlertError] = useState<string | null>(null);
 
   // Generation & Timeline State
   const [isGenerating, setIsGenerating] = useState(false);
@@ -56,6 +60,17 @@ export default function App() {
   const [seekTimeMs, setSeekTimeMs] = useState<number | null>(null);
   const [hasGenerated, setHasGenerated] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Synchronize duration from preview player or video element
+  const handleDurationChange = useCallback((durMs: number) => {
+    if (durMs > 0) {
+      setVideoDurationMs(durMs);
+      setWords((prevWords) => {
+        if (!prevWords || prevWords.length === 0) return prevWords;
+        return sanitizeAndEnforceMonotonic(prevWords, durMs);
+      });
+    }
+  }, []);
 
   // Video Export / Burn-In State
   const [isExporting, setIsExporting] = useState(false);
@@ -110,12 +125,25 @@ export default function App() {
     if (videoBlobUrl) {
       URL.revokeObjectURL(videoBlobUrl);
     }
+    setAlertError(null);
     setSelectedFile(file);
     const url = URL.createObjectURL(file);
     setVideoBlobUrl(url);
     setWords([]);
     setHasGenerated(false);
     setProgress(0);
+
+    const tempVid = document.createElement('video');
+    tempVid.preload = 'metadata';
+    tempVid.src = url;
+    tempVid.onloadedmetadata = () => {
+      if (tempVid.duration && !isNaN(tempVid.duration) && tempVid.duration !== Infinity && tempVid.duration > 0.1) {
+        const dMs = Math.round(tempVid.duration * 1000);
+        setVideoDurationMs(dMs);
+      }
+      tempVid.remove();
+    };
+    tempVid.onerror = () => tempVid.remove();
   };
 
   // Handle Loading sample video
@@ -187,6 +215,7 @@ export default function App() {
     if (videoBlobUrl) {
       URL.revokeObjectURL(videoBlobUrl);
     }
+    setAlertError(null);
     setSelectedFile(null);
     setVideoBlobUrl(null);
     setWords([]);
@@ -195,13 +224,14 @@ export default function App() {
     setIsExporting(false);
   };
 
-  // Generate Captions via Streaming Audio Chunking (Up to 30 mins) & Gemini Translation
+  // Generate Captions via AssemblyAI Multilingual Engine & Sync
   const handleGenerate = async () => {
     if (!selectedFile) return;
 
+    setAlertError(null);
     setIsGenerating(true);
-    setProgress(5);
-    setGenerationStatusText('Splitting audio into streaming segments...');
+    setProgress(10);
+    setGenerationStatusText('Analyzing audio with AssemblyAI...');
     setWords([]); // Clear previous words immediately
 
     const activeKey = localStorage.getItem('autocaption_assembly_key')?.trim() || DEFAULT_ASSEMBLY_KEY;
@@ -209,41 +239,43 @@ export default function App() {
     try {
       let data: any = null;
 
-      // 1. Streaming Audio Chunking Engine (Processes 6-10s segments sequentially in async background loop)
+      // 1. Direct AssemblyAI Multilingual Engine (Word-level timestamps, Hindi / Multilingual detection)
       try {
-        const streamResult = await transcribeAudioChunksStream(
+        const directResult = await transcribeDirectAssemblyAI(
           selectedFile,
           activeKey,
           languageMode,
-          (curProgress, statusText) => {
+          (curProgress) => {
             setProgress(curProgress);
-            if (statusText) setGenerationStatusText(statusText);
-          }
+            setGenerationStatusText(`Transcribing audio... ${curProgress}%`);
+          },
+          videoDurationMs
         );
-        data = streamResult;
-      } catch (streamErr: any) {
-        console.warn('Streaming chunk transcription notice:', streamErr?.message || streamErr);
+        data = directResult;
+      } catch (directErr: any) {
+        console.warn('Direct AssemblyAI notice:', directErr?.message || directErr);
 
-        // 2. Direct Fallback
+        // 2. Fallback to Streaming Audio Chunking Engine
         try {
-          setGenerationStatusText('Analyzing full audio track...');
-          const directResult = await transcribeDirectAssemblyAI(
+          setGenerationStatusText('Processing audio chunks...');
+          const streamResult = await transcribeAudioChunksStream(
             selectedFile,
             activeKey,
             languageMode,
-            (curProgress) => {
+            (curProgress, statusText) => {
               setProgress(curProgress);
-              setGenerationStatusText(`Transcribing... ${curProgress}%`);
-            }
+              if (statusText) setGenerationStatusText(statusText);
+            },
+            videoDurationMs
           );
-          data = directResult;
-        } catch (directErr: any) {
-          console.warn('Direct AssemblyAI notice:', directErr?.message || directErr);
+          data = streamResult;
+        } catch (streamErr: any) {
+          console.warn('Streaming chunk transcription notice:', streamErr?.message || streamErr);
 
           // 3. Fallback to Browser Speech Recognition API
           if (videoBlobUrl) {
             try {
-              setGenerationStatusText('Using browser speech recognition...');
+              setGenerationStatusText('Using speech recognition...');
               const browserResult = await transcribeWithBrowserSpeech(
                 videoBlobUrl,
                 languageMode,
@@ -261,10 +293,21 @@ export default function App() {
       }
 
       setProgress(100);
-      setGenerationStatusText('Captions ready!');
 
       const hasValidData = data && data.words && Array.isArray(data.words) && data.words.length > 0;
-      let rawGeneratedWords: CaptionWord[] = hasValidData ? data.words : [];
+
+      if (!hasValidData) {
+        setWords([]);
+        setHasGenerated(false);
+        const errMsg = 'Speech not recognized or invalid audio format';
+        setAlertError(errMsg);
+        showToast(errMsg);
+        return;
+      }
+
+      setGenerationStatusText('Captions ready!');
+
+      let rawGeneratedWords: CaptionWord[] = data.words;
 
       // Double-check English translation if Translate to English is selected
       if (languageMode === 'translate-en' && rawGeneratedWords.length > 0) {
@@ -274,24 +317,23 @@ export default function App() {
         }
       }
 
-      setWords(rawGeneratedWords);
+      // Map returned words array directly to subtitle state and sanitize monotonic timeline
+      const finalContinuousWords = sanitizeAndEnforceMonotonic(rawGeneratedWords, videoDurationMs);
+      setWords(finalContinuousWords);
       setHasGenerated(true);
+      setAlertError(null);
 
-      const providerLabel = data?.source?.includes('chunk') || data?.source?.includes('stream')
-        ? 'Streaming Audio Chunk Engine (Full Timeline Sync)'
-        : data?.source?.includes('assemblyai')
+      const providerLabel = data?.source?.includes('assemblyai')
         ? 'AssemblyAI (Word-Level Sync)'
+        : data?.source?.includes('chunk') || data?.source?.includes('stream')
+        ? 'Streaming Audio Chunk Engine'
         : data?.source?.includes('browser')
         ? 'Browser Speech Recognition'
-        : data?.source?.includes('gemini')
-        ? 'Gemini Multimodal AI'
         : 'AutoCaptionX Speech Engine';
 
-      const successNotice = hasValidData
-        ? languageMode === 'translate-en'
-          ? `Captions auto-transcribed & translated with ${providerLabel}!`
-          : `Captions generated & synced with ${providerLabel}!`
-        : `Audio analyzed. No audible speech detected in track.`;
+      const successNotice = languageMode === 'translate-en'
+        ? `Captions auto-transcribed & translated with ${providerLabel}!`
+        : `Captions generated & synced with ${providerLabel}!`;
 
       // Save to Account
       if (user) {
@@ -318,7 +360,11 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Caption generation error:', err);
-      showToast(`Notice: ${err.message || 'Processing captions'}`);
+      setWords([]);
+      setHasGenerated(false);
+      const errMsg = 'Speech not recognized or invalid audio format';
+      setAlertError(errMsg);
+      showToast(errMsg);
     } finally {
       setIsGenerating(false);
       setProgress(0);
@@ -397,7 +443,7 @@ export default function App() {
   // Download SRT Subtitle File
   const handleDownloadSrt = () => {
     if (!selectedFile || words.length === 0) return;
-    const srtContent = generateSrtContent(words);
+    const srtContent = generateSrtContent(words, videoDurationMs);
     const blob = new Blob([srtContent], { type: 'text/plain;charset=utf-8' });
     const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
     downloadOrSaveVideoFile(blob, `${baseName}_captions.srt`);
@@ -407,7 +453,7 @@ export default function App() {
   // Download WebVTT Subtitle File
   const handleDownloadVtt = () => {
     if (!selectedFile || words.length === 0) return;
-    const vttContent = generateWebVTT(words);
+    const vttContent = generateWebVTT(words, videoDurationMs);
     const blob = new Blob([vttContent], { type: 'text/vtt;charset=utf-8' });
     const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
     downloadOrSaveVideoFile(blob, `${baseName}_captions.vtt`);
@@ -470,6 +516,28 @@ export default function App() {
           disabled={isGenerating || isExporting}
         />
 
+        {/* Speech Error Alert Banner */}
+        {alertError && (
+          <div className="w-full bg-red-950/80 border border-red-500/80 text-red-200 px-4 py-3.5 rounded-2xl flex items-center justify-between gap-3 shadow-lg animate-in fade-in slide-in-from-top-2 duration-200">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-xl bg-red-900/80 border border-red-700/60 flex items-center justify-center shrink-0 text-red-300">
+                <AlertTriangle className="w-4 h-4" />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-red-100">{alertError}</p>
+                <p className="text-[11px] text-red-300/80">Please ensure the video has audible speech or try selecting "Force Hindi" mode.</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAlertError(null)}
+              className="text-red-300 hover:text-white text-xs px-2.5 py-1 rounded-lg bg-red-900/60 hover:bg-red-800 transition cursor-pointer shrink-0 font-medium"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {/* Video Player & Synchronized Subtitle Preview */}
         <VideoPlayerPreview
           videoUrl={videoBlobUrl}
@@ -478,6 +546,7 @@ export default function App() {
           preset={captionPreset}
           seekTimeMs={seekTimeMs}
           onTimeUpdate={handleTimeUpdate}
+          onDurationChange={handleDurationChange}
         />
 
         {/* Caption Synchronizer & Timeline Editor */}
@@ -489,7 +558,7 @@ export default function App() {
               setSeekTimeMs(ms);
               setTimeout(() => setSeekTimeMs(null), 50);
             }}
-            onUpdateWords={(newWords) => setWords(newWords)}
+            onUpdateWords={(newWords) => setWords(sanitizeAndEnforceMonotonic(newWords, videoDurationMs))}
             preset={captionPreset}
             onPresetChange={(p) => setCaptionPreset(p)}
           />

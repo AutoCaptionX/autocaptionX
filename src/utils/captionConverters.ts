@@ -36,52 +36,171 @@ export function formatSrtTimestamp(ms: number): string {
   return `${hh}:${mm}:${ss},${mmm}`;
 }
 
+export interface CaptionPhrase {
+  id: number;
+  words: CaptionWord[];
+  start: number;
+  end: number;
+  text: string;
+}
+
 /**
- * Groups word-level timestamps into natural 3-4 word phrases for smooth reading
+ * Builds continuous caption phrases spanning 100% of the video duration:
+ * 1. Full video timeline extension from 0:00 to video.duration.
+ * 2. Auto-padding between phrases (endTime of previous caption = startTime of next caption) to eliminate blank screen gaps.
+ * 3. Final spoken caption block holds persistence until the exact end timestamp of the video (video.duration).
  */
-export function groupWordsIntoPhrases(
+export function buildContinuousCaptionPhrases(
   words: CaptionWord[],
-  maxWordsPerPhrase = 4,
-  maxGapMs = 450
-): Array<{ start: number; end: number; text: string; words: CaptionWord[] }> {
+  videoDurationMs?: number,
+  maxWordsPerPhrase = 4
+): CaptionPhrase[] {
   if (!words || words.length === 0) return [];
 
-  const sorted = [...words].sort((a, b) => a.start - b.start);
-  const phrases: Array<{ start: number; end: number; text: string; words: CaptionWord[] }> = [];
-  let current: CaptionWord[] = [];
+  // 1. Sanitize, validate and sort words
+  const sorted = [...words]
+    .filter((w) => Boolean(w && w.text && w.text.trim()))
+    .map((w, idx) => {
+      const s = typeof w.start === 'number' && !isNaN(w.start) ? Math.max(0, Math.round(w.start)) : idx * 300;
+      const e = typeof w.end === 'number' && !isNaN(w.end) ? Math.max(s + 80, Math.round(w.end)) : s + 250;
+      return {
+        ...w,
+        text: w.text.trim(),
+        start: s,
+        end: e,
+      };
+    })
+    .sort((a, b) => a.start - b.start);
+
+  if (sorted.length === 0) return [];
+
+  // 2. Initial natural grouping (3-4 words or sentence punctuation)
+  const phrases: CaptionPhrase[] = [];
+  let currentGroup: CaptionWord[] = [];
 
   const flush = () => {
-    if (current.length === 0) return;
-    const start = current[0].start;
-    const end = Math.max(start + 200, current[current.length - 1].end);
-    const text = current.map((w) => w.text).join(' ');
-    phrases.push({ start, end, text, words: [...current] });
-    current = [];
+    if (currentGroup.length === 0) return;
+    const start = currentGroup[0].start;
+    const end = Math.max(start + 100, currentGroup[currentGroup.length - 1].end);
+    phrases.push({
+      id: phrases.length,
+      words: currentGroup.map((w) => ({ ...w })),
+      start,
+      end,
+      text: currentGroup.map((w) => w.text).join(' '),
+    });
+    currentGroup = [];
   };
 
   for (let i = 0; i < sorted.length; i++) {
     const w = sorted[i];
-    const prev = current[current.length - 1];
+    const prev = currentGroup[currentGroup.length - 1];
 
     const hasPunctuation = prev && /[.!?,\u0964|\n]/.test(prev.text);
-    const hasGap = prev && w.start - prev.end > maxGapMs;
-    const reachedMax = current.length >= maxWordsPerPhrase;
+    const reachedMax = currentGroup.length >= maxWordsPerPhrase;
 
-    if (current.length > 0 && (hasPunctuation || hasGap || reachedMax)) {
+    if (currentGroup.length > 0 && (hasPunctuation || reachedMax)) {
       flush();
     }
-    current.push(w);
+    currentGroup.push(w);
   }
   flush();
+
+  if (phrases.length === 0) return [];
+
+  // 3. FULL VIDEO TIMELINE EXTENSION:
+  // Anchor first phrase at 0:00 so overlay is immediately visible with zero blank lead-in
+  phrases[0].start = 0;
+  if (phrases[0].words.length > 0) {
+    phrases[0].words[0].start = 0;
+  }
+
+  // 4. PREVENT BLANK SCREEN GAPS (AUTO-PAD):
+  // Extend display duration of each caption block so it remains visible on screen
+  // until the next spoken word/sentence begins.
+  for (let i = 0; i < phrases.length - 1; i++) {
+    const nextStart = phrases[i + 1].start;
+    phrases[i].end = nextStart;
+
+    // Extend words inside phrase i so word transitions are seamless with zero gaps
+    const pWords = phrases[i].words;
+    for (let j = 0; j < pWords.length - 1; j++) {
+      pWords[j].end = pWords[j + 1].start;
+    }
+    if (pWords.length > 0) {
+      pWords[pWords.length - 1].end = nextStart;
+    }
+  }
+
+  // 5. CAPTION HOLD & PERSISTENCE UNTIL VIDEO END:
+  // For the final spoken caption block, force its display duration to hold until
+  // the exact end timestamp of the video (video.duration).
+  const lastPhrase = phrases[phrases.length - 1];
+  const targetEnd = videoDurationMs && videoDurationMs > 0
+    ? Math.max(lastPhrase.end, Math.round(videoDurationMs))
+    : Math.max(lastPhrase.end, lastPhrase.start + 3000);
+
+  lastPhrase.end = targetEnd;
+  const lastPWords = lastPhrase.words;
+  for (let j = 0; j < lastPWords.length - 1; j++) {
+    lastPWords[j].end = lastPWords[j + 1].start;
+  }
+  if (lastPWords.length > 0) {
+    lastPWords[lastPWords.length - 1].end = targetEnd;
+  }
 
   return phrases;
 }
 
 /**
+ * Fast O(log N) binary search that guarantees finding the active subtitle phrase
+ * without returning -1 or dropping overlays during pauses or playback.
+ */
+export function findActivePhraseIndex(
+  phrases: Array<{ words: CaptionWord[]; start: number; end: number }>,
+  curMs: number
+): number {
+  if (!phrases || phrases.length === 0) return -1;
+  if (curMs <= phrases[0].start) return 0;
+  if (curMs >= phrases[phrases.length - 1].start) return phrases.length - 1;
+
+  let low = 0;
+  let high = phrases.length - 1;
+
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const phrase = phrases[mid];
+
+    if (curMs >= phrase.start && curMs < phrase.end) {
+      return mid;
+    }
+
+    if (curMs < phrase.start) {
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+
+  return Math.max(0, Math.min(phrases.length - 1, low));
+}
+
+/**
+ * Groups word-level timestamps into natural 3-4 word phrases with continuous timeline padding
+ */
+export function groupWordsIntoPhrases(
+  words: CaptionWord[],
+  videoDurationMs?: number,
+  maxWordsPerPhrase = 4
+): Array<{ start: number; end: number; text: string; words: CaptionWord[] }> {
+  return buildContinuousCaptionPhrases(words, videoDurationMs, maxWordsPerPhrase);
+}
+
+/**
  * Generates a valid WebVTT string from word-level timestamps
  */
-export function generateWebVTT(words: CaptionWord[]): string {
-  const phrases = groupWordsIntoPhrases(words);
+export function generateWebVTT(words: CaptionWord[], videoDurationMs?: number): string {
+  const phrases = buildContinuousCaptionPhrases(words, videoDurationMs);
   let vtt = 'WEBVTT\n\n';
 
   phrases.forEach((p, idx) => {
@@ -96,8 +215,8 @@ export function generateWebVTT(words: CaptionWord[]): string {
 /**
  * Generates a valid SRT string from word-level timestamps
  */
-export function generateSRT(words: CaptionWord[]): string {
-  const phrases = groupWordsIntoPhrases(words);
+export function generateSRT(words: CaptionWord[], videoDurationMs?: number): string {
+  const phrases = buildContinuousCaptionPhrases(words, videoDurationMs);
   let srt = '';
 
   phrases.forEach((p, idx) => {

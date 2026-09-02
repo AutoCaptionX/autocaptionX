@@ -31,45 +31,91 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 mt-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">
         <button
           type="button"
           disabled={disabled}
-          onClick={() => onChange('translate-en')}
-          className={`py-2 px-3 rounded-xl border text-left transition-all cursor-pointer select-none relative ${
-            languageMode === 'translate-en'
+          onClick={() => onChange('original')}
+          className={`py-2 px-2.5 rounded-xl border text-left transition-all cursor-pointer select-none relative ${
+            languageMode === 'original'
               ? 'bg-blue-950/60 border-blue-500 text-white shadow-xs ring-1 ring-blue-500/40'
               : 'bg-slate-800/80 border-slate-700/80 text-slate-200 hover:bg-slate-800 hover:border-slate-600'
           } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
         >
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold flex items-center gap-1 text-slate-100">
-              Translate to English
+            <span className="text-xs font-bold text-slate-100">
+              Auto Detect
             </span>
-            <span className="px-1.5 py-0.2 bg-blue-600 text-white rounded text-[9px] font-extrabold uppercase tracking-wide">
-              Auto
+            <span className="px-1.5 py-0.2 bg-blue-600/80 text-white rounded text-[9px] font-extrabold uppercase">
+              AI
             </span>
           </div>
           <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
-            Hindi/Others → English Subtitles
+            Hindi, Regional & Any
           </p>
         </button>
 
         <button
           type="button"
           disabled={disabled}
-          onClick={() => onChange('original')}
-          className={`py-2 px-3 rounded-xl border text-left transition-all cursor-pointer select-none ${
-            languageMode === 'original'
+          onClick={() => onChange('hindi')}
+          className={`py-2 px-2.5 rounded-xl border text-left transition-all cursor-pointer select-none ${
+            languageMode === 'hindi'
+              ? 'bg-blue-950/60 border-blue-500 text-white shadow-xs ring-1 ring-blue-500/40'
+              : 'bg-slate-800/80 border-slate-700/80 text-slate-200 hover:bg-slate-800 hover:border-slate-600'
+          } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-100">
+              Force Hindi
+            </span>
+            <span className="text-[10px] text-amber-400 font-semibold">
+              हिन्दी
+            </span>
+          </div>
+          <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
+            Exact Hindi Devanagari
+          </p>
+        </button>
+
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onChange('translate-en')}
+          className={`py-2 px-2.5 rounded-xl border text-left transition-all cursor-pointer select-none relative ${
+            languageMode === 'translate-en'
+              ? 'bg-blue-950/60 border-blue-500 text-white shadow-xs ring-1 ring-blue-500/40'
+              : 'bg-slate-800/80 border-slate-700/80 text-slate-200 hover:bg-slate-800 hover:border-slate-600'
+          } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-100">
+              Translate EN
+            </span>
+            <span className="px-1.5 py-0.2 bg-emerald-600 text-white rounded text-[9px] font-extrabold uppercase">
+              En
+            </span>
+          </div>
+          <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
+            Hindi/Others → English
+          </p>
+        </button>
+
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onChange('romanized-hinglish')}
+          className={`py-2 px-2.5 rounded-xl border text-left transition-all cursor-pointer select-none ${
+            languageMode === 'romanized-hinglish'
               ? 'bg-blue-950/60 border-blue-500 text-white shadow-xs ring-1 ring-blue-500/40'
               : 'bg-slate-800/80 border-slate-700/80 text-slate-200 hover:bg-slate-800 hover:border-slate-600'
           } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
         >
           <span className="text-xs font-bold block text-slate-100 leading-tight">
-            Original Language
+            Hinglish
           </span>
           <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
-            Keep exact native words (Hindi/Original)
+            Hindi in English letters
           </p>
         </button>
       </div>

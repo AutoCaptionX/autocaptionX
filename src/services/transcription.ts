@@ -465,7 +465,8 @@ export async function transcribeDirectAssemblyAI(
   file: File,
   providedApiKey?: string,
   languageMode: CaptionLanguageMode = 'translate-en',
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  videoDurationMs?: number
 ): Promise<TranscriptionResult> {
   const customKey = providedApiKey?.trim();
   const keysToTry: string[] = [];
@@ -531,17 +532,12 @@ export async function transcribeDirectAssemblyAI(
         punctuate: true,
         format_text: true,
         filter_profanity: false,
-        word_boost: ['AutoCaptionX', 'video', 'subscribe', 'channel', 'like', 'comment', 'share', 'namaste', 'bhai', 'dosto', 'hindi', 'english'],
-        boost_param: 'high',
       };
 
-      if (languageMode === 'original') {
-        // Automatically detect spoken language (e.g. Hindi, Spanish, etc.) or preserve original
-        transcriptPayload.language_detection = true;
-      } else if (languageMode === 'translate-en') {
-        // When translate is chosen, detect language so we can translate from Hindi/Native to English
-        transcriptPayload.language_detection = true;
+      if (languageMode === 'hindi') {
+        transcriptPayload.language_code = 'hi';
       } else {
+        // Automatic multilingual language detection (detects Hindi, Bhojpuri, Regional, English, etc.)
         transcriptPayload.language_detection = true;
       }
 
@@ -592,16 +588,17 @@ export async function transcribeDirectAssemblyAI(
         onProgress?.(Math.min(79, 55 + Math.round((attempts / 60) * 24)));
 
         if (pollData.status === 'completed') {
+          // Direct mapping of returned words array (containing text, start, end)
           const rawWords: CaptionWord[] = (pollData.words || []).map((w: any) => ({
             text: String(w.text || '').trim(),
             start: Math.round(Number(w.start) || 0),
             end: Math.round(Number(w.end) || 0),
-            confidence: Number(w.confidence) || 0.95,
-          }));
+            confidence: Number(w.confidence) || 0.98,
+          })).filter((w: CaptionWord) => w.text.length > 0);
 
-          if (rawWords.length === 0 && pollData.text) {
+          if (rawWords.length === 0 && pollData.text && pollData.text.trim().length > 0) {
             // If words array is empty but full text exists, build time-distributed words
-            const wordsList = pollData.text.split(/\s+/).filter(Boolean);
+            const wordsList = pollData.text.trim().split(/\s+/).filter(Boolean);
             const totalDuration = (pollData.audio_duration || 10) * 1000;
             const wordDuration = Math.round(totalDuration / Math.max(1, wordsList.length));
             wordsList.forEach((txt: string, idx: number) => {
@@ -609,14 +606,16 @@ export async function transcribeDirectAssemblyAI(
                 text: txt,
                 start: idx * wordDuration,
                 end: (idx + 1) * wordDuration - 20,
-                confidence: 0.9,
+                confidence: 0.95,
               });
             });
           }
 
-          // Align word timestamps with Web Audio API context energy envelope
-          const audioAlignedWords = alignWordTimestampsWithAudio(rawWords, decodedAudioBuffer);
-          let processedWords = polishCaptionWords(audioAlignedWords);
+          if (rawWords.length === 0) {
+            throw new Error('Speech not recognized or invalid audio format');
+          }
+
+          let processedWords = rawWords;
 
           // Handle language translation / transliteration
           if (languageMode === 'translate-en') {
@@ -629,7 +628,8 @@ export async function transcribeDirectAssemblyAI(
             }));
           }
 
-          processedWords = sanitizeAndEnforceMonotonic(processedWords);
+          const calculatedDuration = Math.round((pollData.audio_duration || 0) * 1000) || videoDurationMs;
+          processedWords = sanitizeAndEnforceMonotonic(processedWords, calculatedDuration);
 
           return {
             id: transcriptId,
@@ -637,16 +637,16 @@ export async function transcribeDirectAssemblyAI(
             text: processedWords.map((w) => w.text).join(' '),
             words: processedWords,
             source: 'assemblyai-cloud',
-            detectedLanguage: pollData.language_code || 'auto',
+            detectedLanguage: pollData.language_code || (languageMode === 'hindi' ? 'hi' : 'auto'),
           };
         }
 
         if (pollData.status === 'error') {
-          throw new Error(pollData.error || 'AssemblyAI speech processing error');
+          throw new Error(pollData.error || 'Speech not recognized or invalid audio format');
         }
       }
 
-      throw new Error('AssemblyAI transcription polling timed out for long video.');
+      throw new Error('Speech not recognized or invalid audio format');
     } catch (err: any) {
       console.warn(`AssemblyAI key index ${kIdx} failed:`, err.message);
       lastError = err;
@@ -654,7 +654,7 @@ export async function transcribeDirectAssemblyAI(
     }
   }
 
-  throw lastError || new Error('Could not complete AssemblyAI transcription.');
+  throw lastError || new Error('Speech not recognized or invalid audio format');
 }
 
 // Streaming Audio Chunking Engine for Long Videos (30s up to 30+ Mins)
@@ -664,7 +664,8 @@ export async function transcribeAudioChunksStream(
   file: File,
   providedApiKey?: string,
   languageMode: CaptionLanguageMode = 'translate-en',
-  onProgress?: (progress: number, statusText?: string) => void
+  onProgress?: (progress: number, statusText?: string) => void,
+  videoDurationMs?: number
 ): Promise<TranscriptionResult> {
   onProgress?.(5, 'Parsing video audio track...');
 
@@ -751,7 +752,7 @@ export async function transcribeAudioChunksStream(
     onProgress?.(50, 'Analyzing full audio track...');
     return transcribeDirectAssemblyAI(file, providedApiKey, languageMode, (pct) => {
       onProgress?.(pct, `Transcribing... ${pct}%`);
-    });
+    }, videoDurationMs);
   }
 
   onProgress?.(90, 'Aligning continuous timeline & formatting captions...');
@@ -776,7 +777,7 @@ export async function transcribeAudioChunksStream(
   }
 
   // Step 6: Strict continuous timeline monotonicity check across the entire duration (up to 30 mins)
-  const continuousSyncedWords = sanitizeAndEnforceMonotonic(finalWords);
+  const continuousSyncedWords = sanitizeAndEnforceMonotonic(finalWords, videoDurationMs);
 
   onProgress?.(100, 'Captions ready!');
 

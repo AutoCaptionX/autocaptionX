@@ -842,10 +842,13 @@ Return a JSON object strictly matching:
               audio_url: uploadUrl,
               punctuate: true,
               format_text: true,
-              language_detection: true,
-              word_boost: ['AutoCaptionX', 'video', 'subscribe', 'channel', 'like', 'comment', 'share', 'namaste', 'bhai', 'dosto', 'hindi', 'english'],
-              boost_param: 'high',
             };
+
+            if (languageMode === 'hindi' || req.body.languageMode === 'hindi') {
+              transcriptPayload.language_code = 'hi';
+            } else {
+              transcriptPayload.language_detection = true;
+            }
 
             const transcriptResponse = await fetch('https://api.assemblyai.com/v2/transcript', {
               method: 'POST',
@@ -917,57 +920,21 @@ Return a JSON object strictly matching:
 
       cleanUpFile();
 
-      // 3. Fallback Smart Full-Timeline Phrase Synthesizer
-      const fallbackPhrases = shouldTranslateToEnglish
-        ? [
-            'Welcome to AutoCaptionX AI',
-            'Full audio transcription and translation engine',
-            'Generating precision word-by-word synchronized subtitles',
-            'Ready for Instagram Reels and YouTube Shorts',
-          ]
-        : [
-            'AutoCaptionX AI में आपका स्वागत है',
-            'रियल-टाइम वोइस और ऑडियो सबटाइटल इंजन',
-            'रील्स और शॉर्ट्स के लिए सटीक टाइमस्टैम्प',
-            'वीडियो कैप्शन पूरी तरह से तैयार हैं',
-          ];
-
-      const phraseCount = fallbackPhrases.length;
-      const phraseDuration = Math.round(videoDurationMs / phraseCount);
-      const generatedWords: Array<{ text: string; start: number; end: number; confidence: number }> = [];
-
-      fallbackPhrases.forEach((phrase, pIdx) => {
-        const pStart = pIdx * phraseDuration;
-        const pEnd = (pIdx + 1) * phraseDuration - 150;
-        const pWords = phrase.split(/\s+/).filter(Boolean);
-        const wDuration = Math.round((pEnd - pStart) / pWords.length);
-
-        pWords.forEach((word, wIdx) => {
-          generatedWords.push({
-            text: word,
-            start: pStart + wIdx * wDuration,
-            end: pStart + (wIdx + 1) * wDuration - 30,
-            confidence: 0.95,
-          });
-        });
-      });
-
-      return res.json({
-        id: `full_timeline_${Date.now()}`,
-        status: 'completed',
-        text: fallbackPhrases.join('. '),
-        words: generatedWords,
-        source: 'full-timeline-engine',
+      // Return error when no speech is recognized
+      return res.status(422).json({
+        error: 'Speech not recognized or invalid audio format',
+        status: 'error',
+        text: '',
+        words: [],
       });
     } catch (error: any) {
       cleanUpFile();
       console.error('Transcription route error:', error);
-      return res.status(200).json({
-        id: `handled_err_${Date.now()}`,
-        status: 'completed',
+      return res.status(422).json({
+        error: 'Speech not recognized or invalid audio format',
+        status: 'error',
         text: '',
         words: [],
-        source: 'error-safe',
       });
     }
   });

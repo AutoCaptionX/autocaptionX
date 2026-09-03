@@ -55,9 +55,21 @@ export async function renderCaptionedVideo(
     let checkIntervalId: any = null;
     let audioCtx: AudioContext | null = null;
 
+    let videoEl: HTMLVideoElement | null = null;
+
     const cleanup = () => {
       if (animId) cancelAnimationFrame(animId);
       if (checkIntervalId) clearInterval(checkIntervalId);
+      if (videoEl) {
+        videoEl.ontimeupdate = null;
+        videoEl.onended = null;
+        videoEl.onerror = null;
+        try {
+          videoEl.pause();
+          videoEl.removeAttribute('src');
+          videoEl.load();
+        } catch (e) {}
+      }
       if (audioCtx && audioCtx.state !== 'closed') {
         try {
           audioCtx.close();
@@ -82,6 +94,7 @@ export async function renderCaptionedVideo(
 
       // 1. Create video element in sandbox
       const video = document.createElement('video');
+      videoEl = video;
       video.src = videoSourceUrl;
       video.crossOrigin = 'anonymous';
       video.playsInline = true;
@@ -187,7 +200,7 @@ export async function renderCaptionedVideo(
       try {
         recorder = new MediaRecorder(stream, {
           mimeType: selectedMimeType || undefined,
-          videoBitsPerSecond: resolution === '4k' ? 8000000 : resolution === '1080p' ? 4500000 : 2500000,
+          videoBitsPerSecond: resolution === '4k' ? 7000000 : resolution === '1080p' ? 3500000 : 2000000,
         });
       } catch (recInitErr) {
         console.warn('Initial MediaRecorder config failed, using basic fallback recorder:', recInitErr);
@@ -217,9 +230,12 @@ export async function renderCaptionedVideo(
       };
 
       recorder.onstop = () => {
+        // Convert the processed canvas video explicitly to video/mp4 format before triggering download
         const finalBlob = new Blob(recordedChunks, {
-          type: selectedMimeType || 'video/mp4',
+          type: 'video/mp4',
         });
+        // Immediately free intermediate chunk references from memory on long videos
+        recordedChunks.length = 0;
         onProgress?.(100, 'Captioned video ready!');
         resolve(finalBlob);
       };
@@ -230,48 +246,50 @@ export async function renderCaptionedVideo(
       };
 
       // 5. High-Precision Render Loop
+      let isDrawing = false;
       const drawFrame = () => {
-        if (isCompleted) return;
+        if (isCompleted || isDrawing) return;
+        isDrawing = true;
 
-        // Check if video has reached its real complete end
-        if (video.ended || (video.currentTime >= totalVideoDuration - 0.05 && video.currentTime > 0.5)) {
+        try {
+          // Check if video has reached its real complete end
+          if (video.ended || (video.currentTime >= totalVideoDuration - 0.05 && video.currentTime > 0.5)) {
+            ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+            const curMs = Math.round(video.currentTime * 1000);
+            const pIdx = findActivePhraseIndex(phrases, curMs);
+            if (pIdx !== -1) {
+              renderSubtitlesOnCanvas(ctx, phrases[pIdx], curMs, preset, targetWidth, targetHeight);
+            }
+
+            onProgress?.(99, 'Finalizing video stream...');
+            setTimeout(finishExport, 250);
+            return;
+          }
+
+          // Draw current video frame to canvas
           ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+
+          // Find active subtitle with binary search and burn it onto canvas
           const curMs = Math.round(video.currentTime * 1000);
           const pIdx = findActivePhraseIndex(phrases, curMs);
           if (pIdx !== -1) {
             renderSubtitlesOnCanvas(ctx, phrases[pIdx], curMs, preset, targetWidth, targetHeight);
           }
 
-          onProgress?.(99, 'Finalizing video stream...');
-          setTimeout(finishExport, 250);
-          return;
+          const pct = Math.min(98, Math.round((video.currentTime / Math.max(1, totalVideoDuration)) * 85) + 12);
+          onProgress?.(pct, `Burning captions into video... (${Math.round(video.currentTime)}s / ${Math.round(totalVideoDuration)}s)`);
+        } finally {
+          isDrawing = false;
         }
 
-        // Draw current video frame to canvas
-        ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-
-        // Find active subtitle with binary search and burn it onto canvas
-        const curMs = Math.round(video.currentTime * 1000);
-        const pIdx = findActivePhraseIndex(phrases, curMs);
-        if (pIdx !== -1) {
-          renderSubtitlesOnCanvas(ctx, phrases[pIdx], curMs, preset, targetWidth, targetHeight);
-        }
-
-        const pct = Math.min(98, Math.round((video.currentTime / Math.max(1, totalVideoDuration)) * 85) + 12);
-        onProgress?.(pct, `Burning captions into video... (${Math.round(video.currentTime)}s / ${Math.round(totalVideoDuration)}s)`);
-
-        animId = requestAnimationFrame(drawFrame);
-      };
-
-      // Start recording
-      recorder.start(100);
-      video.currentTime = 0;
-
-      video.ontimeupdate = () => {
         if (!isCompleted) {
-          drawFrame();
+          animId = requestAnimationFrame(drawFrame);
         }
       };
+
+      // Start recording with 500ms timeslice to prevent chunk array bloat on long videos
+      recorder.start(500);
+      video.currentTime = 0;
 
       video.onended = () => {
         setTimeout(finishExport, 200);

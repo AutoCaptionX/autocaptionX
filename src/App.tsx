@@ -79,6 +79,7 @@ export default function App() {
   const [exportedVideoBlob, setExportedVideoBlob] = useState<Blob | null>(null);
   const [exportedFileName, setExportedFileName] = useState<string>('');
   const [isExportPreviewOpen, setIsExportPreviewOpen] = useState(false);
+  const [isExportFallbackMode, setIsExportFallbackMode] = useState(false);
 
   // Universal Auth State Listener (Syncs Firebase + LocalStorage Auth)
   useEffect(() => {
@@ -398,42 +399,50 @@ export default function App() {
         }
       );
 
+      // Convert the processed canvas video explicitly to video/mp4 format before triggering download
+      const mp4Blob = new Blob([renderedBlob], { type: 'video/mp4' });
       const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
-      const ext = renderedBlob.type.includes('webm') ? 'webm' : 'mp4';
-      const fileName = `captioned_${baseName}_${selectedResolution}.${ext}`;
+      const fileName = `captioned_${baseName}_${selectedResolution}.mp4`;
 
-      setExportedVideoBlob(renderedBlob);
+      setExportedVideoBlob(mp4Blob);
       setExportedFileName(fileName);
       setIsExportPreviewOpen(true);
 
-      const res = await downloadOrSaveVideoFile(renderedBlob, fileName, (notice) => {
+      const res = await downloadOrSaveVideoFile(mp4Blob, fileName, (notice) => {
         setExportStatusText(notice);
       });
 
-      showToast(res.message || `Saved captioned video in ${selectedResolution.toUpperCase()}!`);
+      if (res.needsLongPressModal) {
+        setIsExportFallbackMode(true);
+        showToast('Tap and hold (long-press) the video preview to save directly to gallery.');
+      } else {
+        setIsExportFallbackMode(false);
+        showToast(res.message || `Saved captioned video in ${selectedResolution.toUpperCase()} MP4!`);
+      }
     } catch (exportErr: any) {
-      console.warn('Canvas render notice, downloading direct video with .srt subtitles:', exportErr);
+      console.warn('Canvas render notice, falling back to direct video stream preview modal:', exportErr);
       
       try {
         const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
         const response = await fetch(videoBlobUrl);
         const sourceBlob = await response.blob();
-        setExportedVideoBlob(sourceBlob);
-        setExportedFileName(`captioned_${baseName}_${selectedResolution}.mp4`);
+        // Convert to video/mp4 explicitly
+        const mp4Fallback = new Blob([sourceBlob], { type: 'video/mp4' });
+        const fallbackName = `captioned_${baseName}_${selectedResolution}.mp4`;
+
+        setExportedVideoBlob(mp4Fallback);
+        setExportedFileName(fallbackName);
+        setIsExportFallbackMode(true);
         setIsExportPreviewOpen(true);
-        await downloadOrSaveVideoFile(sourceBlob, `captioned_${baseName}_${selectedResolution}.mp4`);
+
+        await downloadOrSaveVideoFile(mp4Fallback, fallbackName);
       } catch (e) {
-        const anchor = document.createElement('a');
-        anchor.href = videoBlobUrl;
-        const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
-        anchor.download = `captioned_${baseName}_${selectedResolution}.mp4`;
-        document.body.appendChild(anchor);
-        anchor.click();
-        document.body.removeChild(anchor);
+        setIsExportFallbackMode(true);
+        setIsExportPreviewOpen(true);
       }
 
       handleDownloadSrt();
-      showToast('Saved video with matching .SRT subtitle track!');
+      showToast('Opened Long-Press to Save Video preview with matching .SRT track!');
     } finally {
       setIsExporting(false);
       setExportProgress(0);
@@ -644,11 +653,15 @@ export default function App() {
 
       <ExportPreviewModal
         isOpen={isExportPreviewOpen}
-        onClose={() => setIsExportPreviewOpen(false)}
+        onClose={() => {
+          setIsExportPreviewOpen(false);
+          setIsExportFallbackMode(false);
+        }}
         renderedVideoBlob={exportedVideoBlob}
         fileName={exportedFileName}
         resolution={selectedResolution}
         onDownloadSrt={handleDownloadSrt}
+        isFallbackMode={isExportFallbackMode}
       />
     </div>
   );

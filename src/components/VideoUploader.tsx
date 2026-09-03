@@ -35,7 +35,7 @@ export const VideoUploader: React.FC<VideoUploaderProps> = ({
 
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       const file = e.dataTransfer.files[0];
-      if (file.type.includes('video') || file.name.match(/\.(mp4|mov|webm|mkv)$/i)) {
+      if (file.type.startsWith('video/') || file.name.match(/\.(mp4|mov|webm|mkv|avi|flv|wmv|m4v|3gp)$/i) || file.type === '') {
         onFileSelect(file);
       }
     }
@@ -60,7 +60,7 @@ export const VideoUploader: React.FC<VideoUploaderProps> = ({
       <input
         ref={fileInputRef}
         type="file"
-        accept="video/mp4,video/quicktime,video/webm,video/mov,video/*"
+        accept="video/*, .mp4, .mkv, .webm, .mov"
         onChange={handleChange}
         className="hidden"
         disabled={disabled}
@@ -86,7 +86,7 @@ export const VideoUploader: React.FC<VideoUploaderProps> = ({
               Upload or Drag Video Here
             </h4>
             <p className="text-xs text-slate-400 font-medium">
-              MP4, MOV, WebM, MKV <span className="font-semibold text-blue-400">(Up to 5 GB supported)</span>
+              16:9 Landscape & 9:16 Portrait • MP4, MOV, WebM, MKV <span className="font-semibold text-blue-400">(Up to 5 GB supported)</span>
             </p>
           </div>
 

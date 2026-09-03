@@ -25,7 +25,6 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoWrapperRef = useRef<HTMLDivElement>(null);
-  const progressBarRef = useRef<HTMLDivElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -51,6 +50,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 
   const lastParentUpdateTimeRef = useRef(0);
   const lastActiveWordRef = useRef<{ phraseIndex: number; wordIdx: number } | null>(null);
+  const lastTouchTimeRef = useRef<number>(0);
 
   // Effective video duration in ms (handles metadata, durationchange, and video element duration)
   const effectiveDurationMs = useMemo(() => {
@@ -68,6 +68,51 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       onDurationChange(effectiveDurationMs);
     }
   }, [effectiveDurationMs, onDurationChange]);
+
+  // Calculate displayed bounding box of the video for caption bounds
+  const updateDisplayedBounds = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const rect = video.getBoundingClientRect();
+    const videoRatio = (video.videoWidth && video.videoHeight) ? video.videoWidth / video.videoHeight : 16 / 9;
+    const containerRatio = rect.width / (rect.height || 1);
+
+    let displayedW = rect.width;
+    let displayedH = rect.height;
+
+    if (containerRatio > videoRatio) {
+      displayedW = rect.height * videoRatio;
+    } else {
+      displayedH = rect.width / videoRatio;
+    }
+
+    setDisplayedVideoBounds({
+      width: Math.max(160, displayedW),
+      height: Math.max(120, displayedH),
+    });
+  }, []);
+
+  // Dedicated direct handler for video element onLoadedMetadata
+  const handleVideoLoadedMetadata = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    const video = e.currentTarget;
+    if (video.duration && !isNaN(video.duration) && video.duration !== Infinity && video.duration > 0.1) {
+      const durMs = Math.round(video.duration * 1000);
+      setDurationMs(durMs);
+      onDurationChange?.(durMs);
+    }
+    const vw = video.videoWidth || 0;
+    const vh = video.videoHeight || 0;
+    if (vw > 0 && vh > 0) {
+      // 16:9 landscape when width > height, 9:16 portrait when height >= width
+      setVideoDimensions({
+        width: vw,
+        height: vh,
+        isVertical: vh >= vw,
+      });
+    }
+    updateDisplayedBounds();
+    setIsBuffering(false);
+  };
 
   // 2. AUTO-FILL SILENCE GAPS (HOLD CAPTION):
   // - Modify word end times: Set effective endTime of each word to startTime of next word.
@@ -136,6 +181,12 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
   }, [synchronizedWords, phrases]);
 
+  // Keep a stable ref to syncSubtitleForTime so RAF loop doesn't restart on phrase updates
+  const syncSubtitleForTimeRef = useRef(syncSubtitleForTime);
+  useEffect(() => {
+    syncSubtitleForTimeRef.current = syncSubtitleForTime;
+  }, [syncSubtitleForTime]);
+
   // Immediately sync subtitle state on mount, when phrases change, or when video loads
   useEffect(() => {
     if (phrases.length > 0 || words.length > 0) {
@@ -159,39 +210,28 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     const video = videoRef.current;
     if (!video) return;
 
-    let animFrameId: number;
+    let animFrameId: number = 0;
 
     const checkSubtitleSync = () => {
       if (video && !video.paused) {
         const curMs = Math.round(video.currentTime * 1000);
+        syncSubtitleForTimeRef.current(curMs);
 
-        // Update seekbar DOM directly with zero React overhead
-        if (progressBarRef.current && video.duration > 0) {
-          const pct = Math.min(100, Math.max(0, (video.currentTime / video.duration) * 100));
-          progressBarRef.current.style.width = `${pct}%`;
-        }
-
-        syncSubtitleForTime(curMs);
-
-        // Throttle parent onTimeUpdate to 100ms for smooth timeline list indicator
+        // Throttle parent onTimeUpdate to 150ms for smooth timeline list indicator without overloading React
         const now = performance.now();
-        if (now - lastParentUpdateTimeRef.current > 100) {
+        if (now - lastParentUpdateTimeRef.current > 150) {
           lastParentUpdateTimeRef.current = now;
           onTimeUpdateRef.current?.(curMs);
         }
-      }
 
-      animFrameId = requestAnimationFrame(checkSubtitleSync);
+        animFrameId = requestAnimationFrame(checkSubtitleSync);
+      }
     };
 
     const handleSyncImmediate = () => {
       if (!video) return;
       const curMs = Math.round(video.currentTime * 1000);
-      if (progressBarRef.current && video.duration > 0) {
-        const pct = Math.min(100, Math.max(0, (video.currentTime / video.duration) * 100));
-        progressBarRef.current.style.width = `${pct}%`;
-      }
-      syncSubtitleForTime(curMs);
+      syncSubtitleForTimeRef.current(curMs);
       onTimeUpdateRef.current?.(curMs);
     };
 
@@ -204,10 +244,11 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       const vw = video.videoWidth || 0;
       const vh = video.videoHeight || 0;
       if (vw > 0 && vh > 0) {
+        // 16:9 landscape when width > height, 9:16 portrait when height >= width
         setVideoDimensions({
           width: vw,
           height: vh,
-          isVertical: vh > vw,
+          isVertical: vh >= vw,
         });
       }
       updateDisplayedBounds();
@@ -289,6 +330,9 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       setDurationMs(Math.round(video.duration * 1000));
     }
 
+    // Initial bounding check
+    updateDisplayedBounds();
+
     return () => {
       cancelAnimationFrame(animFrameId);
       resizeObserver.disconnect();
@@ -305,7 +349,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       video.removeEventListener('canplay', handleCanPlay);
       video.removeEventListener('ended', handleEnded);
     };
-  }, [videoUrl, syncSubtitleForTime]);
+  }, [videoUrl, onDurationChange]);
 
   // Safe play/pause toggle
   const handleTogglePlay = useCallback(() => {
@@ -356,18 +400,31 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
   };
 
-  const handleProgressBarClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!videoRef.current || durationMs <= 0) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const percentage = Math.max(0, Math.min(1, clickX / rect.width));
-    const newTimeSec = percentage * (durationMs / 1000);
-    videoRef.current.currentTime = newTimeSec;
-    const newTimeMs = Math.round(newTimeSec * 1000);
-    if (progressBarRef.current) {
-      progressBarRef.current.style.width = `${percentage * 100}%`;
+  // Handle click on video surface to toggle play/pause (ignoring bottom 60px where native controls sit)
+  const handleVideoClick = (e: React.MouseEvent<HTMLVideoElement>) => {
+    // If touched recently, suppress synthetic click event from mobile devices
+    if (Date.now() - lastTouchTimeRef.current < 400) {
+      return;
     }
-    onTimeUpdateRef.current?.(newTimeMs);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const distanceFromBottom = rect.bottom - e.clientY;
+    if (distanceFromBottom <= 60) {
+      return;
+    }
+    handleTogglePlay();
+  };
+
+  // Handle touch interactions on mobile touchscreens
+  const handleTouchEnd = (e: React.TouchEvent<HTMLVideoElement>) => {
+    lastTouchTimeRef.current = Date.now();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const touch = e.changedTouches[0];
+    if (!touch) return;
+    const distanceFromBottom = rect.bottom - touch.clientY;
+    if (distanceFromBottom <= 60) {
+      return;
+    }
+    handleTogglePlay();
   };
 
   const currentActivePhrase = activeSubtitle !== null && phrases[activeSubtitle.phraseIndex]
@@ -379,8 +436,10 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   return (
     <div
       ref={videoWrapperRef}
-      className={`w-full bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm relative flex items-center justify-center group select-none ${
-        videoDimensions.isVertical ? 'aspect-[9/16] max-h-[78vh] mx-auto w-auto' : 'aspect-video'
+      className={`w-full bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm relative flex items-center justify-center select-none transition-all duration-300 ${
+        videoDimensions.isVertical
+          ? 'aspect-[9/16] max-h-[78vh] mx-auto w-auto max-w-[420px]'
+          : 'aspect-video max-h-[78vh] w-full max-w-4xl mx-auto'
       }`}
     >
       {!videoUrl ? (
@@ -389,7 +448,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             <span>AutoCaption</span>
             <span className="text-blue-500">X</span>
           </div>
-          <p className="text-xs text-slate-400 font-medium">5GB Support • Real-time AI Precision Sync</p>
+          <p className="text-xs text-slate-400 font-medium">16:9 Landscape & 9:16 Portrait • Real-time AI Precision Sync</p>
         </div>
       ) : (
         <div className="w-full h-full relative flex items-center justify-center bg-black overflow-hidden">
@@ -398,10 +457,12 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             src={videoUrl}
             preload="auto"
             playsInline
-            controls={false}
+            controls
             loop={false}
             muted={isMuted}
-            onClick={handleTogglePlay}
+            onClick={handleVideoClick}
+            onTouchEnd={handleTouchEnd}
+            onLoadedMetadata={handleVideoLoadedMetadata}
             className="w-full h-full object-contain cursor-pointer"
           />
 
@@ -411,32 +472,26 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             </div>
           )}
 
-          {!isPlaying && !isBuffering && (
-            <button
-              type="button"
-              onClick={handleTogglePlay}
-              className="absolute inset-0 m-auto w-14 h-14 rounded-full bg-black/65 hover:bg-blue-600/90 border border-white/20 text-white flex items-center justify-center backdrop-blur-xs transition-all shadow-2xl hover:scale-110 active:scale-95 cursor-pointer z-10 pointer-events-auto"
-              title="Play Video"
-            >
-              <Play className="w-6 h-6 fill-white translate-x-0.5" />
-            </button>
-          )}
-
-          {/* Precision Active Subtitles Overlay (9:16 Vertical Safe, Dynamic Font Autoscaler, Zero Overflow) */}
+          {/* Precision Active Subtitles Overlay (16:9 Landscape & 9:16 Portrait Dynamic Scaling, Zero Touch Blocking) */}
           {currentActivePhrase && currentActivePhrase.words.length > 0 && !isGenerating && (
             <div
-              className="absolute pointer-events-none z-20 flex justify-center items-center"
+              className="absolute pointer-events-none z-20 flex justify-center items-center select-none"
               style={{
-                bottom: '15%',
+                pointerEvents: 'none',
+                bottom: videoDimensions.isVertical ? '14%' : '18%',
                 left: '50%',
                 transform: 'translateX(-50%)',
-                width: displayedVideoBounds ? `${Math.round(displayedVideoBounds.width * 0.85)}px` : '85%',
-                maxWidth: '85%',
+                width: displayedVideoBounds
+                  ? `${Math.round(displayedVideoBounds.width * (videoDimensions.isVertical ? 0.88 : 0.82))}px`
+                  : (videoDimensions.isVertical ? '88%' : '82%'),
+                maxWidth: videoDimensions.isVertical ? '88%' : '82%',
               }}
             >
               <div
-                className="bg-black/90 backdrop-blur-md px-3.5 sm:px-5 py-2 sm:py-3 rounded-2xl border border-white/20 shadow-[0_10px_35px_rgba(0,0,0,0.85)] flex items-center justify-center flex-wrap gap-1.5 sm:gap-2.5 text-center w-full transition-all duration-75 animate-in fade-in zoom-in-95"
+                className="bg-black/90 backdrop-blur-md px-3.5 sm:px-5 py-2 sm:py-3 rounded-2xl border border-white/20 shadow-[0_10px_35px_rgba(0,0,0,0.85)] flex items-center justify-center flex-wrap gap-1.5 sm:gap-2.5 text-center w-full transition-all duration-75 animate-in fade-in zoom-in-95 pointer-events-none select-none"
                 style={{
+                  pointerEvents: 'none',
+                  userSelect: 'none',
                   textAlign: 'center',
                   wordBreak: 'break-word',
                   overflowWrap: 'break-word',
@@ -450,23 +505,25 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 
                   // Dynamic font scaler based on displayed bounds, character count, and vertical orientation
                   const totalChars = currentActivePhrase.words.reduce((sum, item) => sum + (item.text || '').length, 0);
-                  const baseBoundW = displayedVideoBounds?.width || 480;
-                  const isVert = videoDimensions.isVertical || (displayedVideoBounds && displayedVideoBounds.height > displayedVideoBounds.width);
-                  
+                  const baseBoundW = displayedVideoBounds?.width || (videoDimensions.isVertical ? 380 : 640);
+                  const isVert = videoDimensions.isVertical;
+
                   // Calculate dynamic font size: scaled to width, clamped safely
                   let calculatedFontSize = isVert
-                    ? Math.max(12, Math.min(20, Math.round((baseBoundW / 25) * (totalChars > 20 ? 0.8 : 1))))
-                    : Math.max(14, Math.min(24, Math.round((baseBoundW / 32) * (totalChars > 22 ? 0.85 : 1))));
+                    ? Math.max(13, Math.min(22, Math.round((baseBoundW / 24) * (totalChars > 20 ? 0.82 : 1))))
+                    : Math.max(16, Math.min(28, Math.round((baseBoundW / 36) * (totalChars > 24 ? 0.85 : 1))));
 
                   if (isCurrent) calculatedFontSize = Math.round(calculatedFontSize * 1.08);
 
                   return (
                     <span
                       key={`${w.text}-${w.start}-${idx}`}
-                      className={`font-black tracking-wide leading-tight transition-all duration-75 drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)] select-none whitespace-normal ${
+                      className={`font-black tracking-wide leading-tight transition-all duration-75 drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)] pointer-events-none select-none whitespace-normal ${
                         isLatin ? 'uppercase' : ''
                       } ${getWordStyle(isCurrent, isPast)}`}
                       style={{
+                        pointerEvents: 'none',
+                        userSelect: 'none',
                         fontSize: `${calculatedFontSize}px`,
                         WebkitTextStroke: isCurrent ? '1.2px #000' : '0.6px #000',
                         fontFamily: '"Montserrat", "Noto Sans Devanagari", "Plus Jakarta Sans", sans-serif',
@@ -483,63 +540,14 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
             </div>
           )}
 
-          {/* Hover Custom Controls with Seekbar */}
-          <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-3 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-30">
-            {/* Seekbar */}
-            <div
-              onClick={handleProgressBarClick}
-              className="w-full h-1.5 bg-white/20 hover:h-2.5 rounded-full cursor-pointer transition-all relative overflow-hidden"
-            >
-              <div
-                ref={progressBarRef}
-                className="h-full bg-blue-500 rounded-full w-0"
-              />
+          {/* Synced Words Status Badge in Top-Right Corner (Non-blocking) */}
+          {words.length > 0 && (
+            <div className="absolute top-3 right-3 z-20 pointer-events-none select-none">
+              <span className="text-[11px] font-bold text-blue-300 bg-black/75 backdrop-blur-xs px-2.5 py-1 rounded-full border border-blue-500/40 flex items-center gap-1 shadow-md">
+                <Sparkles className="w-3 h-3 text-blue-400" /> {words.length} words synced
+              </span>
             </div>
-
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleTogglePlay}
-                  className="p-1.5 bg-white/20 hover:bg-white/30 text-white rounded-lg transition-colors cursor-pointer"
-                >
-                  {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (videoRef.current) {
-                      videoRef.current.currentTime = 0;
-                      if (progressBarRef.current) progressBarRef.current.style.width = '0%';
-                      onTimeUpdateRef.current?.(0);
-                    }
-                  }}
-                  className="p-1.5 bg-white/20 hover:bg-white/30 text-white rounded-lg transition-colors cursor-pointer"
-                  title="Replay from start"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (videoRef.current) {
-                      videoRef.current.muted = !isMuted;
-                      setIsMuted(!isMuted);
-                    }
-                  }}
-                  className="p-1.5 bg-white/20 hover:bg-white/30 text-white rounded-lg transition-colors cursor-pointer"
-                >
-                  {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                </button>
-              </div>
-
-              {words.length > 0 && (
-                <span className="text-[11px] font-bold text-blue-300 bg-blue-950/80 px-2.5 py-0.5 rounded-full border border-blue-800/80 flex items-center gap-1">
-                  <Sparkles className="w-3 h-3 text-blue-400" /> {words.length} words synced
-                </span>
-              )}
-            </div>
-          </div>
+          )}
         </div>
       )}
     </div>

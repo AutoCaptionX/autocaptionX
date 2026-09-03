@@ -265,7 +265,7 @@ export function transliterateDevanagariToHinglish(text: string): string {
   return res || text;
 }
 
-// Clean and polish transcription words
+// Clean and polish transcription words without dropping short words or truncating content
 export function polishCaptionWords(words: CaptionWord[]): CaptionWord[] {
   if (!words || words.length === 0) return [];
 
@@ -276,26 +276,27 @@ export function polishCaptionWords(words: CaptionWord[]): CaptionWord[] {
     let txt = (raw.text || '').trim();
     if (!txt) continue;
 
-    // Check lowercase key in spell correction map
-    const lower = txt.toLowerCase().replace(/^[^\w]+|[^\w]+$/g, '');
-    if (SPELL_CORRECTION_MAP[lower]) {
-      const punc = txt.replace(/^\w+/, '');
+    // Check lowercase key in spell correction map safely preserving unicode
+    const lower = txt.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+    if (lower && SPELL_CORRECTION_MAP[lower]) {
+      const punc = txt.replace(/^[\p{L}\p{N}]+/u, '');
       txt = SPELL_CORRECTION_MAP[lower] + punc;
     }
 
-    // Capitalize "I", "I'm", "I'll", "I've"
+    // Capitalize English "I", "I'm", "I'll", "I've"
     if (lower === 'i' || lower === "i'm" || lower === "i've" || lower === "i'll") {
       txt = txt.charAt(0).toUpperCase() + txt.slice(1);
     }
 
-    // Capitalize first word of sentences
+    // Capitalize first word of sentences for Latin text
     const prev = cleaned[cleaned.length - 1];
     if (!prev || /[.!?\n]/.test(prev.text)) {
       txt = txt.charAt(0).toUpperCase() + txt.slice(1);
     }
 
     const safeStart = typeof raw.start === 'number' && !isNaN(raw.start) ? Math.max(0, raw.start) : (prev ? prev.end + 50 : 0);
-    const safeEnd = typeof raw.end === 'number' && !isNaN(raw.end) ? Math.max(safeStart + 80, raw.end) : safeStart + 250;
+    // Retain short words with minimum 50ms duration
+    const safeEnd = typeof raw.end === 'number' && !isNaN(raw.end) ? Math.max(safeStart + 50, raw.end) : safeStart + 180;
 
     cleaned.push({
       ...raw,
@@ -846,7 +847,7 @@ export async function transcribeAudioChunksStream(
   onProgress?: (progress: number, statusText?: string) => void,
   videoDurationMs?: number
 ): Promise<TranscriptionResult> {
-  onProgress?.(5, 'Splitting audio into 10-15s segments...');
+  onProgress?.(5, 'Splitting audio into 30s segments with silence boundary alignment...');
 
   // 1. Determine active keys to try
   const customKey = providedApiKey?.trim();
@@ -856,13 +857,13 @@ export async function transcribeAudioChunksStream(
     if (!keysToTry.includes(k)) keysToTry.push(k);
   }
 
-  // 2. Split audio into smaller 10-15 second chunks (12 seconds)
-  const chunkDurationMs = 12000;
+  // 2. Split audio into 30-second chunks with pause/silence boundary alignment
+  const chunkDurationMs = 30000;
   const chunks = await splitMediaFileIntoAudioChunks(file, chunkDurationMs, videoDurationMs);
   const totalChunks = chunks.length;
 
-  console.log(`[AutoCaptionX Stream] Processing ${totalChunks} audio chunks (12s each) sequentially...`);
-  onProgress?.(8, `Prepared ${totalChunks} audio segment${totalChunks > 1 ? 's' : ''} (10-15s each)...`);
+  console.log(`[AutoCaptionX Stream] Processing ${totalChunks} audio chunks (30s each) with continuous boundary alignment...`);
+  onProgress?.(8, `Prepared ${totalChunks} audio segment${totalChunks > 1 ? 's' : ''} (30s each)...`);
 
   const accumulatedWords: CaptionWord[] = [];
 
@@ -886,6 +887,18 @@ export async function transcribeAudioChunksStream(
     );
 
     if (chunkWords.length > 0) {
+      // Maintain continuous boundary timing across chunk transitions
+      if (accumulatedWords.length > 0) {
+        const lastWord = accumulatedWords[accumulatedWords.length - 1];
+        const firstWord = chunkWords[0];
+        // If boundary word starts earlier than previous finished, align smoothly without skipping
+        if (firstWord.start < lastWord.start) {
+          firstWord.start = Math.max(lastWord.end, chunk.startOffsetMs);
+          if (firstWord.end <= firstWord.start) {
+            firstWord.end = firstWord.start + 80;
+          }
+        }
+      }
       accumulatedWords.push(...chunkWords);
     }
 

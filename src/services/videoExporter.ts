@@ -316,21 +316,23 @@ function renderSubtitlesOnCanvas(
     : Math.max(22, Math.round(height * 0.062 * charScale));
   const posY = height * 0.85; // Lower-third (bottom: 15%)
 
-  // Active word index matching audio bounds precisely
-  let activeWordIdx = 0;
+  // Active word index matching audio waveform precisely with zero latency
+  let activeWordIdx = -1;
   for (let i = 0; i < phrase.words.length; i++) {
     const w = phrase.words[i];
     const nextW = phrase.words[i + 1];
-    const wordEndBound = nextW ? nextW.start : w.end;
 
-    if (curMs >= w.start && curMs < wordEndBound) {
+    if (curMs >= w.start && curMs <= w.end) {
       activeWordIdx = i;
       break;
-    } else if (curMs >= w.end) {
+    }
+
+    // Micro-pause cadence between words within phrase (< 250ms)
+    if (nextW && curMs > w.end && curMs < nextW.start && (nextW.start - w.end) <= 250) {
       activeWordIdx = i;
+      break;
     }
   }
-  activeWordIdx = Math.max(0, Math.min(phrase.words.length - 1, activeWordIdx));
 
   const fontFamily =
     preset === 'hormozi'
@@ -349,7 +351,7 @@ function renderSubtitlesOnCanvas(
   // Measure all words with styles
   const wordMetrics = phrase.words.map((w, idx) => {
     const text = w.text;
-    const isCurrent = idx === activeWordIdx;
+    const isCurrent = activeWordIdx !== -1 && idx === activeWordIdx;
     const fontSize = isCurrent ? Math.round(baseFontSize * 1.15) : baseFontSize;
     ctx.font = `900 ${fontSize}px ${fontFamily}`;
     const textWidth = ctx.measureText(text).width;

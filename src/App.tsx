@@ -27,7 +27,7 @@ import {
 } from './services/transcription';
 import { transcribeWithBrowserSpeech } from './services/browserSpeechTranscriber';
 import { renderCaptionedVideo, generateSrtContent } from './services/videoExporter';
-import { generateWebVTT } from './utils/captionConverters';
+import { generateWebVTT, generateCaptionJson } from './utils/captionConverters';
 import { sanitizeAndEnforceMonotonic } from './utils/audioExtractor';
 import { downloadOrSaveVideoFile } from './utils/fileDownloader';
 import { ExportPreviewModal } from './components/ExportPreviewModal';
@@ -461,6 +461,16 @@ export default function App() {
     showToast('WebVTT (.VTT) subtitle file saved to Downloads!');
   };
 
+  // Download Word-Level JSON File (Exact timestamps & words without truncation)
+  const handleDownloadJson = () => {
+    if (!selectedFile || words.length === 0) return;
+    const jsonContent = generateCaptionJson(words, videoDurationMs);
+    const blob = new Blob([jsonContent], { type: 'application/json;charset=utf-8' });
+    const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
+    downloadOrSaveVideoFile(blob, `${baseName}_captions.json`);
+    showToast('Word-level JSON timestamp file saved to Downloads!');
+  };
+
   // Load project from History
   const handleSelectProject = (job: CaptionJobData) => {
     if (job.words && job.words.length > 0) {
@@ -594,6 +604,7 @@ export default function App() {
           onDownload={handleDownload}
           onDownloadSrt={handleDownloadSrt}
           onDownloadVtt={handleDownloadVtt}
+          onDownloadJson={handleDownloadJson}
           onReset={handleFileRemove}
         />
 

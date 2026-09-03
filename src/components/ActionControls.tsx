@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sparkles, Download, RotateCcw, Loader2, ShieldAlert, FileText, Film } from 'lucide-react';
+import { Sparkles, Download, RotateCcw, Loader2, ShieldAlert, FileText, FileCode, Film } from 'lucide-react';
 import type { VideoResolution } from '../types';
 
 interface ActionControlsProps {
@@ -16,6 +16,7 @@ interface ActionControlsProps {
   onDownload: () => void;
   onDownloadSrt?: () => void;
   onDownloadVtt?: () => void;
+  onDownloadJson?: () => void;
   onReset: () => void;
 }
 
@@ -33,6 +34,7 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
   onDownload,
   onDownloadSrt,
   onDownloadVtt,
+  onDownloadJson,
   onReset,
 }) => {
   const getResolutionLabel = () => {
@@ -127,7 +129,7 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
           )}
         </button>
 
-        {/* Subtitle SRT & VTT Download Options */}
+        {/* Subtitle SRT, VTT & JSON Download Options */}
         {hasGeneratedCaptions && !isGenerating && !isExporting && (
           <div className="flex items-center justify-center gap-2 pt-1 flex-wrap">
             {onDownloadSrt && (
@@ -148,6 +150,16 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
               >
                 <FileText className="w-3.5 h-3.5 text-cyan-400" />
                 <span>Download .VTT</span>
+              </button>
+            )}
+            {onDownloadJson && (
+              <button
+                type="button"
+                onClick={onDownloadJson}
+                className="text-xs text-slate-400 hover:text-amber-400 transition-colors flex items-center gap-1.5 py-1 px-2.5 rounded-lg hover:bg-slate-800/80 cursor-pointer font-medium border border-slate-800"
+              >
+                <FileCode className="w-3.5 h-3.5 text-amber-400" />
+                <span>Download .JSON</span>
               </button>
             )}
           </div>

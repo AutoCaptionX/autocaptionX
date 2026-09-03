@@ -57,12 +57,12 @@ export function buildContinuousCaptionPhrases(
 ): CaptionPhrase[] {
   if (!words || words.length === 0) return [];
 
-  // 1. Sanitize, validate and sort words
+  // 1. Sanitize and sort words by start time without altering genuine audio waveform bounds
   const sorted = [...words]
-    .filter((w) => Boolean(w && w.text && w.text.trim()))
+    .filter((w) => Boolean(w && typeof w.text === 'string' && w.text.trim().length > 0))
     .map((w, idx) => {
       const s = typeof w.start === 'number' && !isNaN(w.start) ? Math.max(0, Math.round(w.start)) : idx * 300;
-      const e = typeof w.end === 'number' && !isNaN(w.end) ? Math.max(s + 80, Math.round(w.end)) : s + 250;
+      const e = typeof w.end === 'number' && !isNaN(w.end) ? Math.max(s + 50, Math.round(w.end)) : s + 200;
       return {
         ...w,
         text: w.text.trim(),
@@ -81,9 +81,10 @@ export function buildContinuousCaptionPhrases(
   const flush = () => {
     if (currentGroup.length === 0) return;
     const start = currentGroup[0].start;
-    const end = Math.max(start + 100, currentGroup[currentGroup.length - 1].end);
+    const end = Math.max(start + 80, currentGroup[currentGroup.length - 1].end);
     phrases.push({
       id: phrases.length,
+      // Deep clone words so word timestamps remain strictly untouched
       words: currentGroup.map((w) => ({ ...w })),
       start,
       end,
@@ -108,48 +109,69 @@ export function buildContinuousCaptionPhrases(
 
   if (phrases.length === 0) return [];
 
-  // 3. FULL VIDEO TIMELINE EXTENSION:
-  // Anchor first phrase at 0:00 so overlay is immediately visible with zero blank lead-in
-  phrases[0].start = 0;
-  if (phrases[0].words.length > 0) {
-    phrases[0].words[0].start = 0;
-  }
-
-  // 4. PREVENT BLANK SCREEN GAPS (AUTO-PAD):
-  // Extend display duration of each caption block so it remains visible on screen
-  // until the next spoken word/sentence begins.
+  // 3. Smooth phrase container display duration across speech without mutating internal word timestamps:
   for (let i = 0; i < phrases.length - 1; i++) {
     const nextStart = phrases[i + 1].start;
-    phrases[i].end = nextStart;
+    const gap = nextStart - phrases[i].end;
 
-    // Extend words inside phrase i so word transitions are seamless with zero gaps
-    const pWords = phrases[i].words;
-    for (let j = 0; j < pWords.length - 1; j++) {
-      pWords[j].end = pWords[j + 1].start;
-    }
-    if (pWords.length > 0) {
-      pWords[pWords.length - 1].end = nextStart;
+    // If gap between phrases is small (< 800ms), bridge the container display so the caption doesn't flicker
+    if (gap > 0 && gap <= 800) {
+      phrases[i].end = nextStart;
+    } else if (gap > 800) {
+      // For longer pauses, keep container visible for a short reading tail (450ms) after last word
+      phrases[i].end = Math.min(nextStart, phrases[i].end + 450);
     }
   }
 
-  // 5. CAPTION HOLD & PERSISTENCE UNTIL VIDEO END:
-  // For the final spoken caption block, force its display duration to hold until
-  // the exact end timestamp of the video (video.duration).
+  // Final phrase hold until video duration or natural reading tail
   const lastPhrase = phrases[phrases.length - 1];
-  const targetEnd = videoDurationMs && videoDurationMs > 0
-    ? Math.max(lastPhrase.end, Math.round(videoDurationMs))
-    : Math.max(lastPhrase.end, lastPhrase.start + 3000);
-
-  lastPhrase.end = targetEnd;
-  const lastPWords = lastPhrase.words;
-  for (let j = 0; j < lastPWords.length - 1; j++) {
-    lastPWords[j].end = lastPWords[j + 1].start;
-  }
-  if (lastPWords.length > 0) {
-    lastPWords[lastPWords.length - 1].end = targetEnd;
+  if (videoDurationMs && videoDurationMs > lastPhrase.start) {
+    lastPhrase.end = Math.round(videoDurationMs);
+  } else {
+    lastPhrase.end = lastPhrase.end + 800;
   }
 
   return phrases;
+}
+
+/**
+ * Generates clean JSON output retaining all words, timestamps (ms and seconds), confidence, and text
+ * without dropping any short words or truncating content.
+ */
+export function generateCaptionJson(words: CaptionWord[], videoDurationMs?: number): string {
+  const cleanWords = words
+    .filter((w) => Boolean(w && typeof w.text === 'string' && w.text.trim().length > 0))
+    .map((w) => {
+      const s = Math.max(0, Math.round(w.start));
+      const e = Math.max(s + 50, Math.round(w.end));
+      return {
+        text: w.text.trim(),
+        start: s,
+        end: e,
+        start_time: Number((s / 1000).toFixed(3)),
+        end_time: Number((e / 1000).toFixed(3)),
+        confidence: typeof w.confidence === 'number' ? Number(w.confidence.toFixed(2)) : 0.98,
+      };
+    });
+
+  const fullText = cleanWords.map((w) => w.text).join(' ');
+  const dur = videoDurationMs && videoDurationMs > 0
+    ? Math.round(videoDurationMs)
+    : cleanWords.length > 0
+    ? cleanWords[cleanWords.length - 1].end
+    : 0;
+
+  const jsonOutput = {
+    version: '1.0',
+    generator: 'AutoCaptionX',
+    totalWords: cleanWords.length,
+    durationMs: dur,
+    durationSec: Number((dur / 1000).toFixed(3)),
+    text: fullText,
+    words: cleanWords,
+  };
+
+  return JSON.stringify(jsonOutput, null, 2);
 }
 
 /**

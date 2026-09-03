@@ -136,25 +136,25 @@ export function alignWordTimestampsWithAudio(
   try {
     const { timesMs, rms, avgRms, maxRms } = calculateAudioEnergyEnvelope(audioBuffer, 20);
     // Voice activity threshold
-    const voiceThreshold = Math.max(0.015, avgRms * 0.45, maxRms * 0.08);
+    const voiceThreshold = Math.max(0.012, avgRms * 0.4, maxRms * 0.06);
 
     const aligned: CaptionWord[] = [];
 
     for (let i = 0; i < words.length; i++) {
       const w = words[i];
       let startMs = Math.max(0, Math.round(w.start));
-      let endMs = Math.max(startMs + 80, Math.round(w.end));
+      let endMs = Math.max(startMs + 50, Math.round(w.end));
 
-      // 1. Search in a local window [-300ms, +300ms] for closest voice onset (energy rising edge)
+      // Search in a local window [-160ms, +160ms] for closest voice onset (energy rising edge)
       const bucketIdx = Math.floor(startMs / 20);
-      const searchRadius = 15; // 15 * 20ms = 300ms
+      const searchRadius = 8; // 8 * 20ms = 160ms
       const minBucket = Math.max(0, bucketIdx - searchRadius);
       const maxBucket = Math.min(rms.length - 1, bucketIdx + searchRadius);
 
       let bestOnsetMs = startMs;
       let foundOnset = false;
 
-      // Look for the first bucket in the window that crosses the voice threshold
+      // Look for first bucket in window that crosses voice threshold
       for (let b = minBucket; b <= maxBucket; b++) {
         if (rms[b] >= voiceThreshold && (b === 0 || rms[b - 1] < voiceThreshold)) {
           bestOnsetMs = timesMs[b];
@@ -163,14 +163,12 @@ export function alignWordTimestampsWithAudio(
         }
       }
 
-      if (foundOnset && Math.abs(bestOnsetMs - startMs) <= 300) {
+      if (foundOnset && Math.abs(bestOnsetMs - startMs) <= 160) {
         startMs = bestOnsetMs;
       }
 
-      // Ensure min duration weighted by word text length
-      const charCount = (w.text || '').replace(/[^\w]/g, '').length || 3;
-      const minDuration = Math.max(120, Math.min(650, charCount * 45 + 80));
-      endMs = Math.max(startMs + minDuration, endMs);
+      // Preserve acoustic duration while ensuring minimum 50ms for micro-utterances
+      endMs = Math.max(startMs + 50, endMs);
 
       aligned.push({
         ...w,
@@ -186,21 +184,23 @@ export function alignWordTimestampsWithAudio(
   }
 }
 
-// Helper to guarantee strictly non-decreasing, non-overlapping timestamps and continuous timeline coverage
-// AUTO-FILL SILENCE GAPS (HOLD CAPTION):
-// - Modify word end times: Set the effective endTime of each word/phrase to the startTime of the next word.
-// - For the absolute last word of the video, set its endTime equal to video.duration so the final caption remains visible until the last frame.
+// Strict word-level timestamp normalization without distorting genuine audio waveform boundaries:
+// 1. Preserves exact waveform start and end times for each word (no artificial shifting to 0:00).
+// 2. Retains silence gaps between words instead of falsely stretching word endings across pauses.
+// 3. Enforces monotonic non-overlapping order and prevents words from exceeding video duration.
+// 4. Retains all short words and particles accurately.
 export function sanitizeAndEnforceMonotonic(words: CaptionWord[], videoDurationMs?: number): CaptionWord[] {
   if (!words || words.length === 0) return [];
 
   const sorted = [...words]
-    .filter((w) => Boolean(w && w.text && w.text.trim()))
+    .filter((w) => Boolean(w && typeof w.text === 'string' && w.text.trim().length > 0))
     .map((w, idx) => {
       const s = typeof w.start === 'number' && !isNaN(w.start) ? Math.max(0, Math.round(w.start)) : idx * 300;
-      const e = typeof w.end === 'number' && !isNaN(w.end) ? Math.max(s + 50, Math.round(w.end)) : s + 250;
+      // Minimum duration 50ms for ultra-short words/particles (e.g. Hindi "तो", "है", "ki", English "a", "I")
+      const e = typeof w.end === 'number' && !isNaN(w.end) ? Math.max(s + 50, Math.round(w.end)) : s + 200;
       return {
         ...w,
-        text: (w.text || '').trim(),
+        text: w.text.trim(),
         start: s,
         end: e,
       };
@@ -209,26 +209,31 @@ export function sanitizeAndEnforceMonotonic(words: CaptionWord[], videoDurationM
 
   if (sorted.length === 0) return [];
 
-  // Anchor first word at 0:00 so caption is immediately visible from start
-  sorted[0].start = 0;
+  // Enforce chronological progression and clamp overlapping words to genuine boundary
+  for (let i = 0; i < sorted.length; i++) {
+    const curr = sorted[i];
 
-  // Auto-fill silence gaps (Hold Caption):
-  // Set the effective endTime of each word to the startTime of the next word
-  for (let i = 0; i < sorted.length - 1; i++) {
-    if (sorted[i + 1].start <= sorted[i].start) {
-      sorted[i + 1].start = sorted[i].start + 60;
+    if (i < sorted.length - 1) {
+      const next = sorted[i + 1];
+      if (next.start < curr.start) {
+        next.start = curr.start;
+      }
+      // If current word overlaps into next word, clamp end of current word to next word's start
+      if (curr.end > next.start) {
+        curr.end = Math.max(curr.start + 50, next.start);
+      }
     }
-    // Modify word end times: Set effective endTime to startTime of next word
-    sorted[i].end = sorted[i + 1].start;
-  }
 
-  // For the absolute last word of the video, set its endTime equal to video.duration
-  // so the final caption remains visible until the last frame
-  const last = sorted[sorted.length - 1];
-  const targetEnd = videoDurationMs && videoDurationMs > last.start
-    ? Math.round(videoDurationMs)
-    : Math.max(last.end, last.start + 2500);
-  last.end = targetEnd;
+    // Clamp within video duration if specified
+    if (videoDurationMs && videoDurationMs > 0) {
+      if (curr.start >= videoDurationMs) {
+        curr.start = Math.max(0, Math.round(videoDurationMs - 100));
+      }
+      if (curr.end > videoDurationMs) {
+        curr.end = Math.round(videoDurationMs);
+      }
+    }
+  }
 
   return sorted;
 }
@@ -337,17 +342,18 @@ export function float32ArrayToWavBlob(
   return new Blob([wavBuffer], { type: 'audio/wav' });
 }
 
-// Split media file audio into small 10-15 second streaming chunks for long video processing (up to 30 mins)
+// Split media file audio into 30-second streaming chunks with intelligent silence boundary alignment
+// Maintains continuous timing across boundaries so words near the 30s boundary do not lag or skip.
 export async function splitMediaFileIntoAudioChunks(
   file: File | Blob,
-  chunkDurationMs = 12000,
+  chunkDurationMs = 30000,
   targetDurationMs?: number
 ): Promise<AudioChunkSegment[]> {
   try {
     const decodedAudio = await decodeAudioBufferFromFile(file);
     if (!decodedAudio || decodedAudio.duration <= 0) {
       // Fallback: if Web Audio API couldn't decode directly, split by estimated duration
-      const totalDur = targetDurationMs && targetDurationMs > 0 ? targetDurationMs : 15000;
+      const totalDur = targetDurationMs && targetDurationMs > 0 ? targetDurationMs : 30000;
       const numFallbackChunks = Math.max(1, Math.ceil(totalDur / chunkDurationMs));
       const fallbackChunks: AudioChunkSegment[] = [];
 
@@ -367,30 +373,88 @@ export async function splitMediaFileIntoAudioChunks(
     }
 
     const totalDurationMs = Math.round(decodedAudio.duration * 1000);
-    const numChunks = Math.max(1, Math.ceil(totalDurationMs / chunkDurationMs));
-    const chunks: AudioChunkSegment[] = [];
     const sourceData = decodedAudio.getChannelData(0);
     const sampleRate = decodedAudio.sampleRate;
+    const chunks: AudioChunkSegment[] = [];
 
-    for (let i = 0; i < numChunks; i++) {
-      const startOffsetMs = i * chunkDurationMs;
-      const endOffsetMs = Math.min(totalDurationMs, (i + 1) * chunkDurationMs);
-      const durationMs = endOffsetMs - startOffsetMs;
+    let currentStartMs = 0;
+    let chunkIndex = 0;
 
-      // Slice Float32Array directly - zero AudioContext overhead, zero limits
-      const startSample = Math.max(0, Math.floor((startOffsetMs / 1000) * sampleRate));
-      const endSample = Math.min(sourceData.length, Math.ceil((endOffsetMs / 1000) * sampleRate));
+    while (currentStartMs < totalDurationMs) {
+      const remainingMs = totalDurationMs - currentStartMs;
+
+      // If remaining duration is smaller than 1.35 * chunkDurationMs, take it all as final chunk
+      if (remainingMs <= chunkDurationMs * 1.35) {
+        const endOffsetMs = totalDurationMs;
+        const durationMs = endOffsetMs - currentStartMs;
+        const startSample = Math.max(0, Math.floor((currentStartMs / 1000) * sampleRate));
+        const endSample = Math.min(sourceData.length, Math.ceil((endOffsetMs / 1000) * sampleRate));
+        const sliceData = sourceData.subarray(startSample, endSample);
+        const chunkBlob = float32ArrayToWavBlob(sliceData, sampleRate, 16000);
+
+        chunks.push({
+          index: chunkIndex,
+          totalChunks: chunkIndex + 1, // updated after loop
+          startOffsetMs: currentStartMs,
+          endOffsetMs,
+          durationMs,
+          blob: chunkBlob,
+        });
+        break;
+      }
+
+      // 1. INTELLIGENT SILENCE BOUNDARY DETECTION:
+      // Search in window [nominalEnd - 2000ms, nominalEnd + 2000ms] for lowest RMS energy (pause valley)
+      const nominalEndMs = currentStartMs + chunkDurationMs;
+      const searchStartMs = Math.max(currentStartMs + 10000, nominalEndMs - 2000);
+      const searchEndMs = Math.min(totalDurationMs - 2000, nominalEndMs + 2000);
+
+      let bestSplitMs = nominalEndMs;
+      let minRms = Infinity;
+
+      const windowStepMs = 40;
+      const windowSamples = Math.round((windowStepMs / 1000) * sampleRate);
+
+      for (let t = searchStartMs; t <= searchEndMs; t += windowStepMs) {
+        const sampleIdx = Math.floor((t / 1000) * sampleRate);
+        if (sampleIdx + windowSamples > sourceData.length) break;
+
+        let sumSq = 0;
+        for (let s = 0; s < windowSamples; s++) {
+          const val = sourceData[sampleIdx + s] || 0;
+          sumSq += val * val;
+        }
+        const rms = Math.sqrt(sumSq / windowSamples);
+
+        if (rms < minRms) {
+          minRms = rms;
+          bestSplitMs = t;
+        }
+      }
+
+      const actualEndMs = Math.min(totalDurationMs, Math.max(currentStartMs + 10000, bestSplitMs));
+      const durationMs = actualEndMs - currentStartMs;
+      const startSample = Math.max(0, Math.floor((currentStartMs / 1000) * sampleRate));
+      const endSample = Math.min(sourceData.length, Math.ceil((actualEndMs / 1000) * sampleRate));
       const sliceData = sourceData.subarray(startSample, endSample);
       const chunkBlob = float32ArrayToWavBlob(sliceData, sampleRate, 16000);
 
       chunks.push({
-        index: i,
-        totalChunks: numChunks,
-        startOffsetMs,
-        endOffsetMs,
+        index: chunkIndex,
+        totalChunks: 0, // will be updated
+        startOffsetMs: currentStartMs,
+        endOffsetMs: actualEndMs,
         durationMs,
         blob: chunkBlob,
       });
+
+      currentStartMs = actualEndMs;
+      chunkIndex++;
+    }
+
+    // Update totalChunks count
+    for (const c of chunks) {
+      c.totalChunks = chunks.length;
     }
 
     return chunks;
@@ -401,8 +465,8 @@ export async function splitMediaFileIntoAudioChunks(
         index: 0,
         totalChunks: 1,
         startOffsetMs: 0,
-        endOffsetMs: targetDurationMs || 12000,
-        durationMs: targetDurationMs || 12000,
+        endOffsetMs: targetDurationMs || 30000,
+        durationMs: targetDurationMs || 30000,
         blob: file,
       },
     ];

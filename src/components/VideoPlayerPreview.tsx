@@ -82,8 +82,8 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   }, [synchronizedWords, effectiveDurationMs]);
 
   // Synchronize subtitle state for a given millisecond timestamp
-  // Guarantees persistence: holds each caption block until the next one begins,
-  // and holds the final caption block until the exact end of the video.
+  // Real-time zero-latency word synchronization matching exact audio waveform:
+  // Transitions immediately as the sound is uttered with zero latency.
   const syncSubtitleForTime = useCallback((curMs: number) => {
     if (!synchronizedWords || synchronizedWords.length === 0 || !phrases || phrases.length === 0) {
       if (lastActiveWordRef.current !== null) {
@@ -93,55 +93,42 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       return;
     }
 
-    // 1. VIDEO CURRENTTIME LISTENER SYNC:
-    // On every frame tick, filter AssemblyAI transcribed words array where
-    // word.start <= video.currentTime and word.end >= video.currentTime
-    let matchedWordIdx = -1;
-    for (let i = 0; i < synchronizedWords.length; i++) {
-      const w = synchronizedWords[i];
-      if (w.start <= curMs && w.end >= curMs) {
-        matchedWordIdx = i;
-        break;
-      }
-    }
-
-    // Boundary fallbacks if curMs is at start or end
-    if (matchedWordIdx === -1) {
-      if (curMs <= synchronizedWords[0].start) {
-        matchedWordIdx = 0;
-      } else {
-        matchedWordIdx = synchronizedWords.length - 1;
-      }
-    }
-    const matchedWord = synchronizedWords[matchedWordIdx];
-
-    // Find the active phrase containing this matched word or spanning curMs
-    let phraseIdx = phrases.findIndex((p) =>
-      p.words.some((pw) => pw === matchedWord || (pw.text === matchedWord.text && pw.start === matchedWord.start))
-    );
+    // 1. Locate active phrase spanning curMs
+    let phraseIdx = findActivePhraseIndex(phrases, curMs);
     if (phraseIdx === -1) {
-      phraseIdx = findActivePhraseIndex(phrases, curMs);
+      if (curMs < phrases[0].start) {
+        phraseIdx = 0;
+      } else if (curMs > phrases[phrases.length - 1].end) {
+        phraseIdx = phrases.length - 1;
+      }
     }
     phraseIdx = Math.max(0, Math.min(phrases.length - 1, phraseIdx !== -1 ? phraseIdx : 0));
     const currentPhrase = phrases[phraseIdx];
 
-    // Find the word index within currentPhrase that matches curMs
-    let wordIdxInPhrase = currentPhrase.words.findIndex((pw) =>
-      pw === matchedWord || (pw.text === matchedWord.text && pw.start === matchedWord.start)
-    );
-    if (wordIdxInPhrase === -1) {
-      for (let j = 0; j < currentPhrase.words.length; j++) {
-        const pw = currentPhrase.words[j];
-        if (curMs >= pw.start && curMs <= pw.end) {
-          wordIdxInPhrase = j;
-          break;
-        } else if (curMs >= pw.end) {
-          wordIdxInPhrase = j;
-        }
+    // 2. Strict word-level audio waveform synchronization:
+    // Word is active when sound is uttered: curMs >= word.start && curMs <= word.end
+    // Matches the natural pace of Hindi/Hinglish speech with instant word transitions
+    let wordIdxInPhrase = -1;
+
+    for (let j = 0; j < currentPhrase.words.length; j++) {
+      const pw = currentPhrase.words[j];
+      const nextPw = currentPhrase.words[j + 1];
+
+      // Exact waveform match: sound is actively being uttered
+      if (curMs >= pw.start && curMs <= pw.end) {
+        wordIdxInPhrase = j;
+        break;
+      }
+
+      // Micro-pause cadence between words within phrase (< 250ms)
+      if (nextPw && curMs > pw.end && curMs < nextPw.start && (nextPw.start - pw.end) <= 250) {
+        wordIdxInPhrase = j;
+        break;
       }
     }
-    wordIdxInPhrase = Math.max(0, Math.min(currentPhrase.words.length - 1, wordIdxInPhrase));
 
+    // If curMs is before the first word begins or in a long silence, wordIdxInPhrase is -1
+    // (phrase displayed in neutral state without premature word highlight)
     const last = lastActiveWordRef.current;
     if (!last || last.phraseIndex !== phraseIdx || last.wordIdx !== wordIdxInPhrase) {
       lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx: wordIdxInPhrase };
@@ -456,8 +443,9 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                 }}
               >
                 {currentActivePhrase.words.map((w, idx) => {
-                  const isCurrent = activeSubtitle !== null && idx === activeSubtitle.activeWordIdx;
-                  const isPast = activeSubtitle !== null && idx < activeSubtitle.activeWordIdx;
+                  const hasActiveWord = activeSubtitle !== null && activeSubtitle.activeWordIdx !== -1;
+                  const isCurrent = hasActiveWord && idx === activeSubtitle.activeWordIdx;
+                  const isPast = hasActiveWord && idx < activeSubtitle.activeWordIdx;
                   const isLatin = /^[A-Za-z0-9\s.,!?'"%-]+$/.test(w.text || '');
 
                   // Dynamic font scaler based on displayed bounds, character count, and vertical orientation

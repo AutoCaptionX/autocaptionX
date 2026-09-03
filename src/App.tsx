@@ -428,7 +428,7 @@ export default function App() {
 
       if (res.needsLongPressModal) {
         setIsExportFallbackMode(true);
-        showToast('Tap and hold (long-press) the video preview to save directly to gallery.');
+        showToast('Long press video to Save to Gallery');
       } else {
         setIsExportFallbackMode(false);
         showToast(res.message || `Saved captioned video in ${selectedResolution.toUpperCase()} MP4!`);
@@ -581,6 +581,10 @@ export default function App() {
           seekTimeMs={seekTimeMs}
           onTimeUpdate={handleTimeUpdate}
           onDurationChange={handleDurationChange}
+          onDownload={handleDownload}
+          onDownloadSrt={handleDownloadSrt}
+          onDownloadVtt={handleDownloadVtt}
+          onDownloadJson={handleDownloadJson}
         />
 
         {/* Caption Synchronizer & Timeline Editor */}

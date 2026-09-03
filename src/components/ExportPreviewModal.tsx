@@ -117,14 +117,14 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold text-white flex items-center gap-2">
-                {fallbackActive ? 'Long-press to Save Video' : 'Video Export Ready'}
+                {fallbackActive ? 'Long press video to Save to Gallery' : 'Video Export Ready'}
                 <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">
                   {resolution} MP4
                 </span>
               </h3>
               <p className="text-xs text-slate-400">
                 {fallbackActive 
-                  ? 'Tap and hold video player to save to your phone gallery' 
+                  ? 'Chrome Android download fallback: tap and hold video player' 
                   : 'Captions permanently burned into video/mp4'}
               </p>
             </div>
@@ -146,9 +146,9 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
             <div className="flex items-start gap-3 p-3.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200">
               <Smartphone className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
               <div>
-                <span className="font-semibold text-xs text-amber-300">Tap & Hold (Long-Press) To Save:</span>
+                <span className="font-semibold text-xs text-amber-300">Long press video to Save to Gallery</span>
                 <p className="text-slate-300 text-[11px] mt-0.5 leading-relaxed">
-                  Your browser requested direct gallery access. <strong className="text-white">Long-press (tap and hold)</strong> the video player below and choose <strong className="text-amber-300 font-bold">"Download video"</strong> or <strong className="text-amber-300 font-bold">"Save Video"</strong>.
+                  Automatic download was blocked by Chrome Android. <strong className="text-white font-bold">Long press (tap and hold)</strong> the video player below and choose <strong className="text-amber-300 font-bold">"Download video"</strong> to save directly to your phone's Gallery.
                 </p>
               </div>
             </div>
@@ -160,6 +160,7 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
               key={videoUrl}
               src={videoUrl}
               controls
+              controlsList="download"
               playsInline
               preload="auto"
               className="w-full max-h-[42vh] object-contain mx-auto"

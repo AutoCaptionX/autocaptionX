@@ -1,21 +1,24 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Sparkles,
-  Play,
-  Pause,
-  Volume2,
-  VolumeX,
-  RotateCcw,
-  Loader2,
-  Maximize,
-  Minimize,
-  SlidersHorizontal,
+  Download,
+  FileText,
+  FileCode,
+  MoreVertical,
+  Copy,
+  Check,
   CheckCircle2,
+  Film,
+  Loader2,
+  X,
+  Smartphone,
+  AlertCircle,
 } from 'lucide-react';
 import type { CaptionWord, CaptionPreset } from '../types';
 import { buildContinuousCaptionPhrases, findActivePhraseIndex } from '../utils/captionConverters';
 import { sanitizeAndEnforceMonotonic } from '../utils/audioExtractor';
 import { renderSubtitlesOnCanvas, disposeSubtitleRenderer } from '../utils/subtitleCanvasRenderer';
+import { downloadOrSaveVideoFile } from '../utils/fileDownloader';
 
 interface VideoPlayerPreviewProps {
   videoUrl: string | null;
@@ -25,6 +28,10 @@ interface VideoPlayerPreviewProps {
   seekTimeMs?: number | null;
   onTimeUpdate?: (ms: number) => void;
   onDurationChange?: (durationMs: number) => void;
+  onDownload?: () => void;
+  onDownloadSrt?: () => void;
+  onDownloadVtt?: () => void;
+  onDownloadJson?: () => void;
 }
 
 const formatTime = (seconds: number): string => {
@@ -42,19 +49,27 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
   seekTimeMs = null,
   onTimeUpdate,
   onDurationChange,
+  onDownload,
+  onDownloadSrt,
+  onDownloadVtt,
+  onDownloadJson,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const overlayMenuRef = useRef<HTMLDivElement>(null);
 
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isBuffering, setIsBuffering] = useState(false);
   const [durationMs, setDurationMs] = useState(0);
   const [currentTimeSec, setCurrentTimeSec] = useState(0);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [showControls, setShowControls] = useState(true);
-  const [useDownscaledPreview, setUseDownscaledPreview] = useState(true);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isOverlayMenuOpen, setIsOverlayMenuOpen] = useState(false);
+  const [copiedInfo, setCopiedInfo] = useState(false);
+  const [isDirectDownloading, setIsDirectDownloading] = useState(false);
+
+  // Fallback modal for Android Chrome when automatic download is blocked
+  const [showAndroidFallbackModal, setShowAndroidFallbackModal] = useState(false);
+  const [fallbackVideoUrl, setFallbackVideoUrl] = useState<string>('');
 
   const [videoDimensions, setVideoDimensions] = useState<{
     width: number;
@@ -66,12 +81,6 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     isVertical: false,
   });
 
-  // Active phrase & word index for overlay sync
-  const [activeSubtitle, setActiveSubtitle] = useState<{
-    phraseIndex: number;
-    activeWordIdx: number;
-  } | null>(null);
-
   const onTimeUpdateRef = useRef(onTimeUpdate);
   useEffect(() => {
     onTimeUpdateRef.current = onTimeUpdate;
@@ -79,7 +88,25 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 
   const lastParentUpdateTimeRef = useRef(0);
   const lastActiveWordRef = useRef<{ phraseIndex: number; wordIdx: number } | null>(null);
-  const controlsTimeoutRef = useRef<any>(null);
+
+  // Close dropdown menus on click outside
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (menuRef.current && !menuRef.current.contains(target)) {
+        setIsMenuOpen(false);
+      }
+      if (overlayMenuRef.current && !overlayMenuRef.current.contains(target)) {
+        setIsOverlayMenuOpen(false);
+      }
+    };
+    if (isMenuOpen || isOverlayMenuOpen) {
+      document.addEventListener('mousedown', handleOutsideClick);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+    };
+  }, [isMenuOpen, isOverlayMenuOpen]);
 
   // Effective video duration in ms
   const effectiveDurationMs = useMemo(() => {
@@ -96,66 +123,16 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     return sanitizeAndEnforceMonotonic(words, effectiveDurationMs);
   }, [words, effectiveDurationMs]);
 
-  // Group into phrases
+  // Group into continuous phrases
   const phrases = useMemo(() => {
     return buildContinuousCaptionPhrases(synchronizedWords, effectiveDurationMs);
   }, [synchronizedWords, effectiveDurationMs]);
 
-  // Compute 720p Maximum Preview Scaling
-  // 16:9 Landscape: max 1280x720
-  // 9:16 Portrait: max 720x1280
-  const previewScale = useMemo(() => {
-    const vw = videoDimensions.width || 1280;
-    const vh = videoDimensions.height || 720;
-    const isVert = vh >= vw;
-
-    const MAX_W = isVert ? 720 : 1280;
-    const MAX_H = isVert ? 1280 : 720;
-
-    let targetW = vw;
-    let targetH = vh;
-
-    if (isVert) {
-      if (targetW > MAX_W) {
-        const ratio = MAX_W / targetW;
-        targetW = MAX_W;
-        targetH = Math.round(vh * ratio);
-      }
-      if (targetH > MAX_H) {
-        const ratio = MAX_H / targetH;
-        targetH = MAX_H;
-        targetW = Math.round(targetW * ratio);
-      }
-    } else {
-      if (targetH > MAX_H) {
-        const ratio = MAX_H / targetH;
-        targetH = MAX_H;
-        targetW = Math.round(vw * ratio);
-      }
-      if (targetW > MAX_W) {
-        const ratio = MAX_W / targetW;
-        targetW = MAX_W;
-        targetH = Math.round(targetH * ratio);
-      }
-    }
-
-    const isDownscaled = targetW < vw || targetH < vh;
-
-    return {
-      width: Math.max(320, targetW),
-      height: Math.max(180, targetH),
-      isDownscaled,
-      origWidth: vw,
-      origHeight: vh,
-    };
-  }, [videoDimensions]);
-
-  // Strict word-level audio waveform synchronization
+  // Word-level audio waveform synchronization
   const syncSubtitleForTime = useCallback((curMs: number) => {
     if (!synchronizedWords || synchronizedWords.length === 0 || !phrases || phrases.length === 0) {
       if (lastActiveWordRef.current !== null) {
         lastActiveWordRef.current = null;
-        setActiveSubtitle(null);
       }
       return;
     }
@@ -187,11 +164,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       }
     }
 
-    const last = lastActiveWordRef.current;
-    if (!last || last.phraseIndex !== phraseIdx || last.wordIdx !== wordIdxInPhrase) {
-      lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx: wordIdxInPhrase };
-      setActiveSubtitle({ phraseIndex: phraseIdx, activeWordIdx: wordIdxInPhrase });
-    }
+    lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx: wordIdxInPhrase };
   }, [synchronizedWords, phrases]);
 
   const syncSubtitleForTimeRef = useRef(syncSubtitleForTime);
@@ -199,27 +172,47 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     syncSubtitleForTimeRef.current = syncSubtitleForTime;
   }, [syncSubtitleForTime]);
 
-  // Draw current video frame to downscaled preview canvas
+  // Canvas subtitle frame rendering: clears transparent canvas and renders active caption
+  // DOWNSCALED PREVIEW RENDER BUFFER: Capped to max 720p to eliminate CPU/RAM exhaustion and freezing on mobile
   const drawPreviewFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas || video.readyState < 2) return;
+    if (!video || !canvas) return;
 
-    const ctx = canvas.getContext('2d', { alpha: false });
+    const ctx = canvas.getContext('2d', { alpha: true });
     if (!ctx) return;
 
-    const renderW = useDownscaledPreview ? previewScale.width : (videoDimensions.width || 1280);
-    const renderH = useDownscaledPreview ? previewScale.height : (videoDimensions.height || 720);
+    const rawW = video.videoWidth || 1280;
+    const rawH = video.videoHeight || 720;
 
-    if (canvas.width !== renderW || canvas.height !== renderH) {
-      canvas.width = renderW;
-      canvas.height = renderH;
+    // Downscale preview render buffer to max 720p
+    let bufW = rawW;
+    let bufH = rawH;
+    if (bufW > 0 && bufH > 0) {
+      if (bufW >= bufH) {
+        // Landscape: max height 720
+        if (bufH > 720) {
+          bufW = Math.round((bufW * 720) / bufH);
+          bufH = 720;
+        }
+      } else {
+        // Portrait: max width 720
+        if (bufW > 720) {
+          bufH = Math.round((bufH * 720) / bufW);
+          bufW = 720;
+        }
+      }
     }
 
-    // Draw downscaled frame
-    ctx.drawImage(video, 0, 0, renderW, renderH);
+    if (canvas.width !== bufW || canvas.height !== bufH) {
+      canvas.width = bufW;
+      canvas.height = bufH;
+    }
 
-    // Draw burned-in subtitle preview using optimized offscreen cache
+    // Clear transparent subtitle canvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Draw active animated subtitle over video
     if (words.length > 0 && phrases.length > 0) {
       const curMs = Math.round(video.currentTime * 1000);
       const pIdx = findActivePhraseIndex(phrases, curMs);
@@ -229,12 +222,12 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
           phrase: phrases[pIdx],
           curMs,
           preset,
-          width: renderW,
-          height: renderH,
+          width: canvas.width,
+          height: canvas.height,
         });
       }
     }
-  }, [useDownscaledPreview, previewScale, videoDimensions, words, phrases, preset]);
+  }, [words, phrases, preset]);
 
   // Load video metadata
   const handleLoadedMetadata = () => {
@@ -255,7 +248,6 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         isVertical: vh >= vw,
       });
     }
-    setIsBuffering(false);
     requestAnimationFrame(drawPreviewFrame);
   };
 
@@ -271,87 +263,64 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     }
   }, [seekTimeMs, syncSubtitleForTime, drawPreviewFrame]);
 
-  // Frame-Rate Throttled Canvas Rendering Loop
+  // LIGHTWEIGHT THROTTLED RENDERING MECHANISM:
+  // - No heavy continuous background loop when video is paused or ended.
+  // - Sync caption rendering strictly with video.currentTime.
+  // - Throttled to max 30 fps only while actively playing.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
-    let animFrameId: number = 0;
-    let vfcHandle: number | null = null;
+    let animFrameId: number | null = null;
     let lastDrawTimestamp = 0;
     const targetFps = 30;
-    const frameIntervalMs = 1000 / targetFps; // ~33.33ms throttled loop
+    const frameIntervalMs = 1000 / targetFps; // ~33.33ms
 
-    // Throttled requestAnimationFrame loop
-    const throttledLoop = (timestamp: number) => {
-      if (!video) return;
+    const stopLoop = () => {
+      if (animFrameId !== null) {
+        cancelAnimationFrame(animFrameId);
+        animFrameId = null;
+      }
+    };
 
-      if (!video.paused && !video.ended) {
-        const elapsed = timestamp - lastDrawTimestamp;
-        if (elapsed >= frameIntervalMs) {
-          lastDrawTimestamp = timestamp - (elapsed % frameIntervalMs);
-          drawPreviewFrame();
+    // Lightweight loop that executes ONLY when video is actively playing
+    const renderLoop = (timestamp: number) => {
+      if (!video || video.paused || video.ended) {
+        stopLoop();
+        return; // STOP! Never loop in background when paused or ended
+      }
 
-          const curMs = Math.round(video.currentTime * 1000);
-          setCurrentTimeSec(video.currentTime);
-          syncSubtitleForTimeRef.current(curMs);
+      const elapsed = timestamp - lastDrawTimestamp;
+      if (elapsed >= frameIntervalMs) {
+        lastDrawTimestamp = timestamp - (elapsed % frameIntervalMs);
+        drawPreviewFrame();
 
-          const now = performance.now();
-          if (now - lastParentUpdateTimeRef.current > 200) {
-            lastParentUpdateTimeRef.current = now;
-            onTimeUpdateRef.current?.(curMs);
-          }
+        const curMs = Math.round(video.currentTime * 1000);
+        setCurrentTimeSec(video.currentTime);
+        syncSubtitleForTimeRef.current(curMs);
+
+        const now = performance.now();
+        if (now - lastParentUpdateTimeRef.current > 150) {
+          lastParentUpdateTimeRef.current = now;
+          onTimeUpdateRef.current?.(curMs);
         }
       }
 
-      animFrameId = requestAnimationFrame(throttledLoop);
-    };
-
-    // Modern requestVideoFrameCallback support
-    const supportsVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
-
-    const onVideoFramePresented = (now: DOMHighResTimeStamp, metadata: any) => {
-      if (!video) return;
-
-      drawPreviewFrame();
-      const mediaSec = typeof metadata.mediaTime === 'number' ? metadata.mediaTime : video.currentTime;
-      setCurrentTimeSec(mediaSec);
-      const curMs = Math.round(mediaSec * 1000);
-      syncSubtitleForTimeRef.current(curMs);
-
-      const perfNow = performance.now();
-      if (perfNow - lastParentUpdateTimeRef.current > 200) {
-        lastParentUpdateTimeRef.current = perfNow;
-        onTimeUpdateRef.current?.(curMs);
-      }
-
+      // Schedule next frame ONLY if video is still actively playing
       if (!video.paused && !video.ended) {
-        // @ts-ignore
-        vfcHandle = video.requestVideoFrameCallback(onVideoFramePresented);
+        animFrameId = requestAnimationFrame(renderLoop);
+      } else {
+        stopLoop();
       }
     };
 
     const handlePlay = () => {
-      setIsPlaying(true);
-      setIsBuffering(false);
-      cancelAnimationFrame(animFrameId);
-      if (supportsVFC) {
-        // @ts-ignore
-        vfcHandle = video.requestVideoFrameCallback(onVideoFramePresented);
-      } else {
-        animFrameId = requestAnimationFrame(throttledLoop);
-      }
+      stopLoop();
+      animFrameId = requestAnimationFrame(renderLoop);
     };
 
-    const handlePause = () => {
-      setIsPlaying(false);
-      setIsBuffering(false);
-      cancelAnimationFrame(animFrameId);
-      if (vfcHandle !== null && 'cancelVideoFrameCallback' in HTMLVideoElement.prototype) {
-        // @ts-ignore
-        video.cancelVideoFrameCallback(vfcHandle);
-        vfcHandle = null;
-      }
+    const handlePauseOrEnded = () => {
+      stopLoop();
       drawPreviewFrame();
       const curMs = Math.round(video.currentTime * 1000);
       setCurrentTimeSec(video.currentTime);
@@ -359,14 +328,13 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       onTimeUpdateRef.current?.(curMs);
     };
 
-    const handleWaiting = () => setIsBuffering(true);
-    const handleCanPlay = () => setIsBuffering(false);
-
-    const handleEnded = () => {
-      setIsPlaying(false);
-      setIsBuffering(false);
-      cancelAnimationFrame(animFrameId);
-      drawPreviewFrame();
+    const handleTimeUpdate = () => {
+      if (video.paused) {
+        drawPreviewFrame();
+        const curMs = Math.round(video.currentTime * 1000);
+        setCurrentTimeSec(video.currentTime);
+        syncSubtitleForTimeRef.current(curMs);
+      }
     };
 
     const handleSeeked = () => {
@@ -381,33 +349,29 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     video.addEventListener('durationchange', handleLoadedMetadata);
     video.addEventListener('play', handlePlay);
     video.addEventListener('playing', handlePlay);
-    video.addEventListener('pause', handlePause);
-    video.addEventListener('waiting', handleWaiting);
-    video.addEventListener('canplay', handleCanPlay);
-    video.addEventListener('ended', handleEnded);
+    video.addEventListener('pause', handlePauseOrEnded);
+    video.addEventListener('ended', handlePauseOrEnded);
+    video.addEventListener('waiting', stopLoop);
     video.addEventListener('seeked', handleSeeked);
     video.addEventListener('seeking', handleSeeked);
+    video.addEventListener('timeupdate', handleTimeUpdate);
 
-    // Initial frame render
+    // Initial paint of single frame
     drawPreviewFrame();
 
     return () => {
-      cancelAnimationFrame(animFrameId);
+      stopLoop();
       disposeSubtitleRenderer();
-      if (vfcHandle !== null && 'cancelVideoFrameCallback' in HTMLVideoElement.prototype) {
-        // @ts-ignore
-        video.cancelVideoFrameCallback(vfcHandle);
-      }
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
       video.removeEventListener('durationchange', handleLoadedMetadata);
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('playing', handlePlay);
-      video.removeEventListener('pause', handlePause);
-      video.removeEventListener('waiting', handleWaiting);
-      video.removeEventListener('canplay', handleCanPlay);
-      video.removeEventListener('ended', handleEnded);
+      video.removeEventListener('pause', handlePauseOrEnded);
+      video.removeEventListener('ended', handlePauseOrEnded);
+      video.removeEventListener('waiting', stopLoop);
       video.removeEventListener('seeked', handleSeeked);
       video.removeEventListener('seeking', handleSeeked);
+      video.removeEventListener('timeupdate', handleTimeUpdate);
     };
   }, [drawPreviewFrame]);
 
@@ -422,215 +386,364 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     };
   }, [videoUrl]);
 
-  // Play / Pause Toggle
-  const handleTogglePlay = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
+  // Direct video file download handler from three dots menu
+  const handleDirectDownloadVideo = async () => {
+    setIsMenuOpen(false);
+    setIsOverlayMenuOpen(false);
 
-    if (video.paused) {
-      if (video.ended) {
-        video.currentTime = 0;
+    // If user has generated captions, prioritize running the full export with burned-in captions
+    if (words.length > 0 && onDownload) {
+      onDownload();
+      return;
+    }
+
+    if (!videoUrl) return;
+
+    setIsDirectDownloading(true);
+    try {
+      const res = await fetch(videoUrl);
+      const sourceBlob = await res.blob();
+      const mp4Blob = new Blob([sourceBlob], { type: 'video/mp4' });
+      const downloadRes = await downloadOrSaveVideoFile(mp4Blob, 'AutoCaptionX_Video.mp4');
+
+      // If automatic download is blocked by Chrome Android, display fallback popup modal
+      if (downloadRes.needsLongPressModal) {
+        setFallbackVideoUrl(downloadRes.blobUrl || videoUrl);
+        setShowAndroidFallbackModal(true);
       }
-      const playPromise = video.play();
-      if (playPromise !== undefined) {
-        playPromise.catch((err) => console.warn('Playback resume notice:', err));
-      }
-    } else {
-      video.pause();
-    }
-  }, []);
-
-  // Mute / Unmute Toggle
-  const handleToggleMute = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.muted = !video.muted;
-    setIsMuted(video.muted);
-  }, []);
-
-  // Scrubber Seek
-  const handleScrubberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const video = videoRef.current;
-    if (!video) return;
-    const targetSec = parseFloat(e.target.value);
-    video.currentTime = targetSec;
-    setCurrentTimeSec(targetSec);
-    const curMs = Math.round(targetSec * 1000);
-    syncSubtitleForTime(curMs);
-    onTimeUpdateRef.current?.(curMs);
-    drawPreviewFrame();
-  };
-
-  // Fullscreen Toggle
-  const handleToggleFullscreen = () => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
-    } else {
-      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+    } catch (err) {
+      console.error('Direct video download error:', err);
+      // Show fallback modal on any download block error
+      setFallbackVideoUrl(videoUrl);
+      setShowAndroidFallbackModal(true);
+    } finally {
+      setIsDirectDownloading(false);
     }
   };
 
-  // Auto-hide controls during playback
-  const handleUserActivity = () => {
-    setShowControls(true);
-    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
-    if (isPlaying) {
-      controlsTimeoutRef.current = setTimeout(() => {
-        setShowControls(false);
-      }, 2800);
-    }
+  const handleCopyVideoInfo = () => {
+    const totalSec = effectiveDurationMs > 0 ? effectiveDurationMs / 1000 : (videoRef.current?.duration || 0);
+    const info = `AutoCaptionX Video Details:\nResolution: ${videoDimensions.width}x${videoDimensions.height} (${videoDimensions.isVertical ? 'Portrait 9:16' : 'Landscape 16:9'})\nDuration: ${formatTime(totalSec)}\nWords: ${words.length}`;
+    navigator.clipboard.writeText(info).then(() => {
+      setCopiedInfo(true);
+      setTimeout(() => setCopiedInfo(false), 2000);
+    });
   };
-
-  const totalSec = effectiveDurationMs > 0 ? effectiveDurationMs / 1000 : (videoRef.current?.duration || 0);
 
   return (
     <div
       ref={containerRef}
-      onMouseMove={handleUserActivity}
-      onTouchStart={handleUserActivity}
-      className={`w-full bg-slate-950 border border-slate-800/90 rounded-2xl overflow-hidden shadow-2xl relative flex items-center justify-center select-none transition-all duration-300 ${
-        videoDimensions.isVertical
-          ? 'aspect-[9/16] max-h-[78vh] mx-auto w-auto max-w-[420px]'
-          : 'aspect-video max-h-[78vh] w-full max-w-4xl mx-auto'
-      }`}
+      className="w-full bg-slate-950 border border-slate-800/90 rounded-2xl overflow-hidden shadow-2xl relative flex flex-col select-none transition-all duration-300"
     >
-      {!videoUrl ? (
-        <div className="text-center p-6 flex flex-col items-center justify-center">
-          <div className="flex items-center gap-1.5 text-white font-bold text-2xl tracking-tight mb-1">
+      {/* Top Header Bar Right Next to Video Preview with Custom Three Dots (⋮) Menu */}
+      <div className="w-full flex items-center justify-between px-3.5 py-2.5 bg-slate-900/95 border-b border-slate-800/80 text-xs backdrop-blur-md z-30">
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 font-bold text-white tracking-tight">
             <span>AutoCaption</span>
             <span className="text-blue-500">X</span>
           </div>
-          <p className="text-xs text-slate-400 font-medium">
-            16:9 Landscape & 9:16 Portrait • 720p Lag-Free AI Preview
-          </p>
+
+          {videoDimensions.width > 0 && (
+            <span className="text-[11px] font-mono bg-slate-800 text-slate-300 px-2.5 py-0.5 rounded-full border border-slate-700/80 flex items-center gap-1">
+              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+              <span>
+                {videoDimensions.width}x{videoDimensions.height} • {videoDimensions.isVertical ? '9:16 Portrait' : '16:9 Landscape'}
+              </span>
+            </span>
+          )}
+
+          {words.length > 0 && (
+            <span className="text-[11px] text-blue-400 bg-blue-950/60 border border-blue-800/60 px-2.5 py-0.5 rounded-full font-medium flex items-center gap-1 shadow-xs">
+              <Sparkles className="w-3 h-3" /> {words.length} words synced
+            </span>
+          )}
         </div>
-      ) : (
-        <div className="w-full h-full relative flex items-center justify-center bg-black overflow-hidden group">
-          {/* Underlying HTML5 video element handles hardware audio playback & decoding */}
-          <video
-            ref={videoRef}
-            src={videoUrl}
-            preload="auto"
-            playsInline
-            muted={isMuted}
-            className="hidden"
-          />
 
-          {/* 720p Max Downscaled Preview Canvas (Zero lag on 2-minute+ videos & mobile devices) */}
-          <canvas
-            ref={canvasRef}
-            onClick={handleTogglePlay}
-            className="w-full h-full object-contain cursor-pointer"
-          />
-
-          {/* Buffering Indicator */}
-          {isBuffering && (
-            <div className="absolute inset-0 m-auto w-12 h-12 rounded-full bg-black/80 backdrop-blur-xs flex items-center justify-center z-25 pointer-events-none">
-              <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
-            </div>
-          )}
-
-          {/* Big Center Play Button Overlay when Paused */}
-          {!isPlaying && !isBuffering && (
-            <div
-              onClick={handleTogglePlay}
-              className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-blue-600/90 hover:bg-blue-500 text-white flex items-center justify-center cursor-pointer shadow-2xl transition-transform hover:scale-110 z-20"
-              title="Play Video"
+        {/* Header Bar Options Menu Button */}
+        {videoUrl && (
+          <div className="flex items-center gap-2 relative shrink-0" ref={menuRef}>
+            <button
+              type="button"
+              id="video-options-menu-btn"
+              onClick={() => setIsMenuOpen((prev) => !prev)}
+              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 transition cursor-pointer flex items-center justify-center shadow-xs"
+              title="Video Options (⋮)"
+              aria-label="Video options"
             >
-              <Play className="w-8 h-8 fill-white translate-x-0.5" />
-            </div>
-          )}
+              <MoreVertical className="w-4 h-4" />
+            </button>
 
-          {/* Top Info Badges */}
-          <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none z-20">
-            {/* 720p Preview Downscaling Indicator */}
-            <div className="flex items-center gap-1.5 pointer-events-auto">
-              <button
-                onClick={() => {
-                  setUseDownscaledPreview((prev) => !prev);
-                  setTimeout(drawPreviewFrame, 50);
-                }}
-                className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-all flex items-center gap-1.5 cursor-pointer shadow-md ${
-                  useDownscaledPreview
-                    ? 'bg-emerald-950/85 text-emerald-300 border-emerald-500/50'
-                    : 'bg-slate-900/85 text-slate-300 border-slate-700'
-                }`}
-                title="Toggle 720p downscaling (recommended for smooth playback on long videos)"
-              >
-                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                <span>{useDownscaledPreview ? '720p Preview (Lag-Free)' : 'Native Res'}</span>
-                {previewScale.isDownscaled && (
-                  <span className="text-[10px] opacity-75 font-mono">
-                    ({previewScale.width}x{previewScale.height})
-                  </span>
+            {/* Dropdown Menu from Header */}
+            {isMenuOpen && (
+              <div className="absolute right-0 top-full mt-1.5 w-60 bg-slate-900 border border-slate-700/90 rounded-xl shadow-2xl z-50 py-1.5 backdrop-blur-xl animate-in fade-in zoom-in-95 text-xs">
+                <button
+                  type="button"
+                  id="direct-download-video-opt"
+                  onClick={handleDirectDownloadVideo}
+                  disabled={isDirectDownloading}
+                  className="w-full px-3.5 py-2.5 text-left font-semibold text-white hover:bg-blue-600/25 hover:text-blue-300 flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  {isDirectDownloading ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+                  ) : (
+                    <Download className="w-4 h-4 text-blue-400" />
+                  )}
+                  <span>Save / Download Video</span>
+                </button>
+
+                {onDownloadSrt && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMenuOpen(false);
+                      onDownloadSrt();
+                    }}
+                    className="w-full px-3.5 py-2 text-left text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors cursor-pointer"
+                  >
+                    <FileText className="w-4 h-4 text-amber-400" />
+                    <span>Download .SRT Subtitles</span>
+                  </button>
                 )}
-              </button>
-            </div>
 
-            {/* Word count badge */}
-            {words.length > 0 && (
-              <div className="pointer-events-none">
-                <span className="text-[11px] font-bold text-blue-300 bg-black/80 backdrop-blur-xs px-2.5 py-1 rounded-full border border-blue-500/40 flex items-center gap-1 shadow-md">
-                  <Sparkles className="w-3 h-3 text-blue-400" /> {words.length} words synced
-                </span>
+                {onDownloadVtt && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMenuOpen(false);
+                      onDownloadVtt();
+                    }}
+                    className="w-full px-3.5 py-2 text-left text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors cursor-pointer"
+                  >
+                    <FileText className="w-4 h-4 text-cyan-400" />
+                    <span>Download .VTT Subtitles</span>
+                  </button>
+                )}
+
+                {onDownloadJson && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMenuOpen(false);
+                      onDownloadJson();
+                    }}
+                    className="w-full px-3.5 py-2 text-left text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors cursor-pointer"
+                  >
+                    <FileCode className="w-4 h-4 text-emerald-400" />
+                    <span>Download .JSON Words</span>
+                  </button>
+                )}
+
+                <div className="h-px bg-slate-800 my-1" />
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    handleCopyVideoInfo();
+                  }}
+                  className="w-full px-3.5 py-2 text-left text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  {copiedInfo ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-slate-400" />}
+                  <span>{copiedInfo ? 'Info Copied!' : 'Copy Video Details'}</span>
+                </button>
               </div>
             )}
           </div>
+        )}
+      </div>
 
-          {/* Sleek Custom Controls Bar */}
-          <div
-            className={`absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/95 via-black/70 to-transparent z-30 transition-opacity duration-200 ${
-              showControls || !isPlaying ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-            }`}
-          >
-            {/* Scrubber Progress Bar */}
-            <div className="relative mb-2 flex items-center">
-              <input
-                type="range"
-                min={0}
-                max={totalSec > 0 ? totalSec : 100}
-                step={0.05}
-                value={currentTimeSec}
-                onChange={handleScrubberChange}
-                className="w-full h-1.5 bg-slate-700/80 rounded-lg appearance-none cursor-pointer accent-blue-500 focus:outline-none"
-              />
+      {/* Main Video & Canvas Player Stage */}
+      <div
+        className={`w-full relative flex items-center justify-center bg-black overflow-hidden ${
+          videoDimensions.isVertical
+            ? 'aspect-[9/16] max-h-[72vh] mx-auto'
+            : 'aspect-video max-h-[72vh] mx-auto'
+        }`}
+      >
+        {!videoUrl ? (
+          <div className="text-center p-8 flex flex-col items-center justify-center">
+            <Film className="w-12 h-12 text-slate-700 mb-3" />
+            <p className="text-sm text-slate-400 font-semibold mb-1">No Video Loaded</p>
+            <p className="text-xs text-slate-600">Upload a video to preview subtitles with HTML5 native controls.</p>
+          </div>
+        ) : (
+          <div className="w-full h-full relative flex items-center justify-center bg-black overflow-hidden group">
+            {/* HTML5 Video Element with Native Controls & Browser Native Overflow Menu */}
+            <video
+              ref={videoRef}
+              id="autocaptionx-video-player"
+              src={videoUrl}
+              controls
+              controlsList="download"
+              playsInline
+              preload="auto"
+              className="w-full h-full object-contain bg-black z-0"
+            />
+
+            {/* Overlay Canvas for Burned-In Animated Subtitles (Pointer-events-none passes clicks directly to native controls) */}
+            <canvas
+              ref={canvasRef}
+              id="autocaptionx-subtitle-canvas"
+              className="absolute inset-0 w-full h-full object-contain pointer-events-none z-10"
+            />
+
+            {/* HTML5 Video Native Overlay 3-Dots (⋮) Menu Button sitting directly on video player */}
+            <div
+              ref={overlayMenuRef}
+              className="absolute top-3 right-3 z-20 pointer-events-auto flex flex-col items-end"
+            >
+              <button
+                type="button"
+                id="video-overlay-3dots-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsOverlayMenuOpen((prev) => !prev);
+                }}
+                className="w-8 h-8 rounded-full bg-black/70 hover:bg-black/90 text-white/90 hover:text-white border border-white/20 backdrop-blur-md flex items-center justify-center shadow-lg transition cursor-pointer active:scale-95"
+                title="Options (⋮)"
+                aria-label="Video overlay options"
+              >
+                <MoreVertical className="w-4 h-4" />
+              </button>
+
+              {/* Overlay Dropdown Menu */}
+              {isOverlayMenuOpen && (
+                <div className="mt-1.5 w-56 bg-slate-900/95 border border-slate-700 rounded-xl shadow-2xl py-1.5 backdrop-blur-xl animate-in fade-in zoom-in-95 text-xs z-30">
+                  <button
+                    type="button"
+                    onClick={handleDirectDownloadVideo}
+                    disabled={isDirectDownloading}
+                    className="w-full px-3.5 py-2.5 text-left font-semibold text-white hover:bg-blue-600/30 hover:text-blue-300 flex items-center gap-2.5 transition cursor-pointer"
+                  >
+                    {isDirectDownloading ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+                    ) : (
+                      <Download className="w-4 h-4 text-blue-400" />
+                    )}
+                    <span>Save / Download Video</span>
+                  </button>
+
+                  {onDownloadSrt && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsOverlayMenuOpen(false);
+                        onDownloadSrt();
+                      }}
+                      className="w-full px-3.5 py-2 text-left text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition cursor-pointer"
+                    >
+                      <FileText className="w-4 h-4 text-amber-400" />
+                      <span>Download .SRT Subtitles</span>
+                    </button>
+                  )}
+
+                  {onDownloadVtt && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsOverlayMenuOpen(false);
+                        onDownloadVtt();
+                      }}
+                      className="w-full px-3.5 py-2 text-left text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition cursor-pointer"
+                    >
+                      <FileText className="w-4 h-4 text-cyan-400" />
+                      <span>Download .VTT Subtitles</span>
+                    </button>
+                  )}
+
+                  <div className="h-px bg-slate-800 my-1" />
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsOverlayMenuOpen(false);
+                      handleCopyVideoInfo();
+                    }}
+                    className="w-full px-3.5 py-2 text-left text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition cursor-pointer"
+                  >
+                    {copiedInfo ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-slate-400" />}
+                    <span>{copiedInfo ? 'Info Copied!' : 'Copy Video Details'}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Fallback Popup Modal when Automatic Download is Blocked by Chrome Android */}
+      {showAndroidFallbackModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in">
+          <div className="relative w-full max-w-md bg-slate-900 border border-slate-700/90 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+            <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-800 bg-slate-900/95">
+              <div className="flex items-center gap-2.5">
+                <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                  <Smartphone className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Long press video to Save to Gallery</h3>
+                  <p className="text-[11px] text-slate-400">Mobile Chrome download fallback</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAndroidFallbackModal(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+                title="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
 
-            {/* Bottom Controls Row */}
-            <div className="flex items-center justify-between text-xs text-white">
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleTogglePlay}
-                  className="p-1.5 text-white hover:text-blue-400 transition-colors cursor-pointer rounded-lg hover:bg-white/10"
-                  title={isPlaying ? 'Pause' : 'Play'}
-                >
-                  {isPlaying ? <Pause className="w-4 h-4 fill-white" /> : <Play className="w-4 h-4 fill-white" />}
-                </button>
-
-                <button
-                  onClick={handleToggleMute}
-                  className="p-1.5 text-white hover:text-blue-400 transition-colors cursor-pointer rounded-lg hover:bg-white/10"
-                  title={isMuted ? 'Unmute' : 'Mute'}
-                >
-                  {isMuted ? <VolumeX className="w-4 h-4 text-red-400" /> : <Volume2 className="w-4 h-4" />}
-                </button>
-
-                {/* Time Display */}
-                <span className="font-mono text-[11px] text-slate-300">
-                  {formatTime(currentTimeSec)} / {formatTime(totalSec)}
-                </span>
+            <div className="p-4 space-y-3.5 overflow-y-auto">
+              {/* Instruction banner */}
+              <div className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs">
+                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <p className="leading-relaxed">
+                  Automatic download was blocked by Chrome Android. <strong className="text-white font-bold">Long press (tap and hold)</strong> the video below and choose <strong className="text-amber-300 font-bold">"Download video"</strong> to save to your phone's Gallery.
+                </p>
               </div>
 
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleToggleFullscreen}
-                  className="p-1.5 text-white hover:text-blue-400 transition-colors cursor-pointer rounded-lg hover:bg-white/10"
-                  title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-                >
-                  {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
-                </button>
+              {/* Video Player */}
+              <div className="rounded-xl overflow-hidden bg-black border border-slate-800 flex items-center justify-center max-h-[45vh]">
+                <video
+                  src={fallbackVideoUrl}
+                  controls
+                  controlsList="download"
+                  playsInline
+                  preload="auto"
+                  className="w-full max-h-[45vh] object-contain mx-auto"
+                />
               </div>
+
+              {/* Action button to retry direct download */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (fallbackVideoUrl) {
+                    const a = document.createElement('a');
+                    a.href = fallbackVideoUrl;
+                    a.download = 'AutoCaptionX_Video.mp4';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                  }
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center justify-center gap-2 transition cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                <span>Try Direct Download Again</span>
+              </button>
+            </div>
+
+            <div className="px-4 py-2.5 border-t border-slate-800 bg-slate-900/60 flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setShowAndroidFallbackModal(false)}
+                className="text-xs font-medium text-slate-300 hover:text-white transition cursor-pointer"
+              >
+                Dismiss
+              </button>
             </div>
           </div>
         </div>

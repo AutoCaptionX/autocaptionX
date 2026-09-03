@@ -111,11 +111,20 @@ export function renderSubtitlesOnCanvas({
   // Scale parameters
   const isVertical = height > width;
   const totalChars = phrase.words.reduce((sum, item) => sum + (item.text || '').length, 0);
-  const charScale = totalChars > 22 ? 0.85 : 1;
+  let charScale = 1;
+  if (totalChars > 32) {
+    charScale = 0.78;
+  } else if (totalChars > 22) {
+    charScale = 0.88;
+  } else if (totalChars > 16) {
+    charScale = 0.95;
+  }
+
   const baseFontSize = isVertical
-    ? Math.max(18, Math.round(width * 0.052 * charScale))
-    : Math.max(20, Math.round(height * 0.062 * charScale));
-  const posY = height * 0.85; // Lower-third (bottom: 15%)
+    ? Math.max(16, Math.min(36, Math.round(width * 0.052 * charScale)))
+    : Math.max(18, Math.min(40, Math.round(height * 0.060 * charScale)));
+  // Lower-third (positioned at 78% from top, sitting cleanly above HTML5 video native controls)
+  const posY = Math.round(height * 0.78);
 
   const fontFamily =
     preset === 'hormozi'
@@ -124,34 +133,43 @@ export function renderSubtitlesOnCanvas({
       ? '"Poppins", "Arial Black", sans-serif'
       : '"Plus Jakarta Sans", sans-serif';
 
-  offscreenCtx.font = `900 ${baseFontSize}px ${fontFamily}`;
-  offscreenCtx.textAlign = 'center';
-  offscreenCtx.textBaseline = 'middle';
+  const spacing = Math.max(20, isVertical ? Math.round(width * 0.024) : Math.round(width * 0.018));
+  const activeScale = 1.15;
+  const activeFontSize = Math.round(baseFontSize * activeScale);
 
-  const spacing = isVertical ? Math.round(width * 0.02) : Math.round(width * 0.015);
-  const maxLineWidth = width * 0.82;
-
-  // Measure all words
+  // Measure all words with both base and active fonts to ensure layout stability
+  // Using reserved active word widths prevents layout shifts/jitter as speaker progresses
+  offscreenCtx.font = `900 ${activeFontSize}px ${fontFamily}`;
   const wordMetrics = phrase.words.map((w, idx) => {
-    const text = w.text;
+    const text = w.text || '';
     const isCurrent = activeWordIdx !== -1 && idx === activeWordIdx;
-    const fontSize = isCurrent ? Math.round(baseFontSize * 1.15) : baseFontSize;
+    const fontSize = isCurrent ? activeFontSize : baseFontSize;
     offscreenCtx!.font = `900 ${fontSize}px ${fontFamily}`;
-    const textWidth = offscreenCtx!.measureText(text).width;
-    return { text, textWidth, fontSize, isCurrent, idx };
+    const textWidth = Math.ceil(offscreenCtx!.measureText(text).width);
+
+    offscreenCtx!.font = `900 ${activeFontSize}px ${fontFamily}`;
+    const maxWordWidth = Math.ceil(offscreenCtx!.measureText(text).width);
+
+    return { text, textWidth, maxWordWidth, fontSize, isCurrent, idx };
   });
 
-  // Split words into lines to prevent overflow
+  // Calculate maximum line width allowed to fit comfortably within video canvas
+  // Keep enough margin from canvas edges so captions never clip
+  const maxLineWidth = Math.max(140, Math.min(width * (isVertical ? 0.82 : 0.76), width - 64));
+
+  // Split words into lines using stable maximum word widths to guarantee wrap consistency
   const lines: Array<typeof wordMetrics> = [];
   let currentLine: typeof wordMetrics = [];
   let currentLineWidth = 0;
 
   for (const item of wordMetrics) {
-    const itemTotal = item.textWidth + (currentLine.length > 0 ? spacing : 0);
+    const itemSpacing = currentLine.length > 0 ? spacing : 0;
+    const itemTotal = item.maxWordWidth + itemSpacing;
+
     if (currentLine.length > 0 && currentLineWidth + itemTotal > maxLineWidth) {
       lines.push(currentLine);
       currentLine = [item];
-      currentLineWidth = item.textWidth;
+      currentLineWidth = item.maxWordWidth;
     } else {
       currentLine.push(item);
       currentLineWidth += itemTotal;
@@ -161,18 +179,23 @@ export function renderSubtitlesOnCanvas({
     lines.push(currentLine);
   }
 
-  // Calculate pill dimensions
-  const lineHeight = Math.round(baseFontSize * 1.42);
+  // Calculate pill dimensions with guaranteed margins for yellow badge and stroke
+  const lineHeight = Math.round(baseFontSize * 1.54);
   const totalContentHeight = lines.length * lineHeight;
-  const maxLineW = Math.max(...lines.map((l) => l.reduce((s, w) => s + w.textWidth, 0) + (l.length - 1) * spacing));
+  const maxLineW = Math.max(
+    0,
+    ...lines.map((l) => l.reduce((s, w) => s + w.maxWordWidth, 0) + Math.max(0, l.length - 1) * spacing)
+  );
 
-  const paddingX = Math.round(baseFontSize * 0.85);
-  const paddingY = Math.round(baseFontSize * 0.45);
-  const pillWidth = Math.round(maxLineW + paddingX * 2);
+  // Generous horizontal and vertical padding to completely eliminate yellow badge clipping
+  // 24px badge padding requires at least 28px padding to ensure border clearance
+  const paddingX = Math.max(28, Math.round(baseFontSize * 1.10));
+  const paddingY = Math.max(16, Math.round(baseFontSize * 0.65));
+  const pillWidth = Math.min(width - 24, Math.max(maxLineW + paddingX * 2, 160));
   const pillHeight = Math.round(totalContentHeight + paddingY * 2);
   const pillX = Math.round((width - pillWidth) / 2);
   const pillY = Math.round(posY - pillHeight / 2);
-  const borderRadius = Math.round(baseFontSize * 0.35);
+  const borderRadius = Math.round(baseFontSize * 0.38);
 
   // Resize offscreen canvas to exact pill bounds if needed
   if (offscreenCanvas.width !== pillWidth || offscreenCanvas.height !== pillHeight) {
@@ -197,11 +220,11 @@ export function renderSubtitlesOnCanvas({
   let startLineY = paddingY + lineHeight / 2;
 
   lines.forEach((lineWords) => {
-    const lineWidth = lineWords.reduce((s, w) => s + w.textWidth, 0) + (lineWords.length - 1) * spacing;
-    let curX = (pillWidth - lineWidth) / 2;
+    const lineWidth = lineWords.reduce((s, w) => s + w.textWidth, 0) + Math.max(0, lineWords.length - 1) * spacing;
+    let curX = Math.round((pillWidth - lineWidth) / 2);
 
     lineWords.forEach((w) => {
-      const wordCenterX = curX + w.textWidth / 2;
+      const wordCenterX = Math.round(curX + w.textWidth / 2);
       offscreenCtx!.font = `900 ${w.fontSize}px ${fontFamily}`;
       offscreenCtx!.textAlign = 'center';
       offscreenCtx!.textBaseline = 'middle';
@@ -209,24 +232,23 @@ export function renderSubtitlesOnCanvas({
 
       if (preset === 'hormozi') {
         if (w.isCurrent) {
-          // Highlight background pill
-          const hlPaddingX = Math.round(w.fontSize * 0.22);
-          const hlPaddingY = Math.round(w.fontSize * 0.12);
-          const hlW = w.textWidth + hlPaddingX * 2;
-          const hlH = w.fontSize * 1.3;
-          const hlX = curX - hlPaddingX;
-          const hlY = startLineY - hlH / 2;
+          // Highlight background badge with textWidth + 24px padding
+          const badgePaddingX = 12; // 12px each side = 24px total padding
+          const hlW = Math.round(w.textWidth + 24);
+          const hlH = Math.round(w.fontSize * 1.32);
+          const hlX = Math.round(curX - badgePaddingX);
+          const hlY = Math.round(startLineY - hlH / 2);
 
           offscreenCtx!.beginPath();
-          offscreenCtx!.roundRect(hlX, hlY, hlW, hlH, Math.round(w.fontSize * 0.2));
-          offscreenCtx!.fillStyle = 'rgba(234, 179, 8, 0.35)';
+          offscreenCtx!.roundRect(hlX, hlY, hlW, hlH, Math.max(6, Math.round(w.fontSize * 0.22)));
+          offscreenCtx!.fillStyle = 'rgba(234, 179, 8, 0.42)';
           offscreenCtx!.fill();
 
           // Active Word in Bright Yellow with optimized stroke
           offscreenCtx!.fillStyle = '#fde047';
           // Low-overhead subtle shadow
-          offscreenCtx!.shadowColor = 'rgba(234, 179, 8, 0.6)';
-          offscreenCtx!.shadowBlur = Math.min(8, Math.round(w.fontSize * 0.2));
+          offscreenCtx!.shadowColor = 'rgba(234, 179, 8, 0.65)';
+          offscreenCtx!.shadowBlur = Math.min(6, Math.round(w.fontSize * 0.2));
         } else {
           offscreenCtx!.fillStyle = '#ffffff';
           offscreenCtx!.shadowColor = 'transparent';

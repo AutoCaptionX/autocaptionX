@@ -1,7 +1,7 @@
 // Universal cross-device video & file downloader (Desktop, Android Chrome, iOS Safari, Gallery & Camera Roll)
 export interface SaveFileResult {
   success: boolean;
-  method: 'direct-download' | 'long-press-fallback' | 'share-api';
+  method: 'direct-download' | 'long-press-fallback' | 'new-tab-fallback';
   message: string;
   blobUrl?: string;
   blob?: Blob;
@@ -10,13 +10,12 @@ export interface SaveFileResult {
 }
 
 /**
- * Downloads or saves a video file with memory-leak protections for Android Chrome:
- * 1. Explicitly converts processed canvas video to video/mp4 format before triggering download.
- * 2. Uses FileReader or direct Blob stream to prevent memory leaks on Android Chrome.
- * 3. Does NOT call URL.revokeObjectURL(url) immediately after a.click().
- *    Uses a setTimeout of 30 seconds to allow the mobile device enough time to finish writing to disk/gallery.
- * 4. Secondary fallback: If a.click() triggers an error, signals to render a 'Long-press to Save Video'
- *    HTML5 <video> preview modal so the user can manually tap and hold to save directly to their gallery.
+ * Robust Blob/Stream download function:
+ * 1. Converts rendered Canvas/MediaRecorder output to video/mp4 or video/webm.
+ * 2. Forces browser to trigger a real file download by attaching a hidden <a> tag to document.body,
+ *    setting a.download = "AutoCaptionX_Video.mp4", calling a.click(), and using setTimeout
+ *    (15 seconds delay) before revoking the ObjectURL.
+ * 3. Fallback: If a.click() fails, opens the Blob directly in a new tab or displays a 'Long-press to Save' popup video preview.
  */
 export async function downloadOrSaveVideoFile(
   blob: Blob,
@@ -26,95 +25,105 @@ export async function downloadOrSaveVideoFile(
   const isAndroid = /Android/i.test(navigator.userAgent || navigator.vendor || '');
   const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent || navigator.vendor || '');
 
-  // Convert the processed canvas video explicitly to video/mp4 format before triggering download
-  const mp4Blob = new Blob([blob], { type: 'video/mp4' });
+  // Convert the rendered Canvas/MediaRecorder output to video/mp4 or video/webm
+  const isWebm = blob.type.includes('webm');
+  const targetMime = isWebm ? 'video/webm' : 'video/mp4';
+  const targetExt = isWebm ? '.webm' : '.mp4';
+  const finalBlob = new Blob([blob], { type: targetMime });
 
-  // Ensure fileName has .mp4 extension for video files
-  let safeFileName = fileName && fileName.trim().length > 0 
-    ? fileName.replace(/\.[^/.]+$/, '') + '.mp4'
-    : `AutoCaptionX_${Date.now()}.mp4`;
+  // Safe file name, defaulting to AutoCaptionX_Video.mp4
+  let safeFileName = 'AutoCaptionX_Video' + targetExt;
+  if (fileName && fileName.trim().length > 0) {
+    safeFileName = fileName.replace(/\.[^/.]+$/, '') + targetExt;
+  }
 
-  // Modify download function to use direct Blob stream or FileReader to prevent memory leaks on Android Chrome
+  // Use direct Blob stream or FileReader to prevent memory leaks on Android Chrome
   let objectUrl = '';
   try {
-    if (typeof mp4Blob.stream === 'function') {
-      // Direct Blob stream available in modern Android Chrome (streams without duplicating buffers)
-      objectUrl = URL.createObjectURL(mp4Blob);
+    if (typeof finalBlob.stream === 'function') {
+      objectUrl = URL.createObjectURL(finalBlob);
     } else {
-      // FileReader stream fallback to manage buffer allocation cleanly
       objectUrl = await new Promise<string>((resolve) => {
         const reader = new FileReader();
         reader.onloadend = () => {
           if (reader.result instanceof ArrayBuffer) {
-            const bufferBlob = new Blob([reader.result], { type: 'video/mp4' });
+            const bufferBlob = new Blob([reader.result], { type: targetMime });
             resolve(URL.createObjectURL(bufferBlob));
           } else {
-            resolve(URL.createObjectURL(mp4Blob));
+            resolve(URL.createObjectURL(finalBlob));
           }
         };
-        reader.onerror = () => {
-          resolve(URL.createObjectURL(mp4Blob));
-        };
-        reader.readAsArrayBuffer(mp4Blob);
+        reader.onerror = () => resolve(URL.createObjectURL(finalBlob));
+        reader.readAsArrayBuffer(finalBlob);
       });
     }
   } catch (streamErr) {
-    console.warn('Stream/FileReader initialization notice, falling back to standard createObjectURL:', streamErr);
-    objectUrl = URL.createObjectURL(mp4Blob);
+    console.warn('Stream/FileReader initialization notice, using direct createObjectURL:', streamErr);
+    objectUrl = URL.createObjectURL(finalBlob);
   }
 
-  // 1. Attempt DOM Anchor Download with 30s delayed revoke and error fallback
+  // Force real file download by attaching hidden <a> tag to document.body
   try {
     const a = document.createElement('a');
     a.style.display = 'none';
     a.href = objectUrl;
-    a.download = safeFileName;
-    a.setAttribute('download', safeFileName);
+    a.download = safeFileName || 'AutoCaptionX_Video.mp4';
+    a.setAttribute('download', safeFileName || 'AutoCaptionX_Video.mp4');
     a.rel = 'noopener noreferrer';
 
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
 
-    // CRITICAL: Do NOT call URL.revokeObjectURL(url) immediately after a.click().
-    // Add a setTimeout of 30 seconds to allow the mobile device enough time to finish writing the file to disk/gallery.
+    // CRITICAL: Use setTimeout of 15 seconds delay before revoking ObjectURL
     setTimeout(() => {
       try {
         URL.revokeObjectURL(objectUrl);
       } catch (e) {
         console.warn('URL revoke notice:', e);
       }
-    }, 30000); // 30 seconds
+    }, 15000); // 15 seconds delay
 
     return {
       success: true,
       method: 'direct-download',
       message: isAndroid
-        ? 'Video download started! Saving directly to Phone Gallery & Downloads.'
+        ? 'Video download initiated! Long press video to Save to Gallery if blocked.'
         : isIOS
         ? 'Video downloaded! Tap to open and save to Camera Roll.'
         : 'Captioned video downloaded successfully!',
       blobUrl: objectUrl,
-      blob: mp4Blob,
+      blob: finalBlob,
       fileName: safeFileName,
-      needsLongPressModal: false,
+      needsLongPressModal: isAndroid,
     };
   } catch (clickErr: any) {
-    console.error('a.click() triggered an error, invoking fallback modal:', clickErr);
+    console.error('a.click() failed or was blocked by browser, attempting new tab and fallback modal:', clickErr);
 
-    // Keep objectUrl alive so fallback modal can immediately play and offer long-press save
+    // Secondary fallback: Try to open the Blob directly in a new tab
+    let openedTab = false;
+    try {
+      const newTab = window.open(objectUrl, '_blank');
+      if (newTab) openedTab = true;
+    } catch (tabErr) {
+      console.warn('window.open fallback blocked:', tabErr);
+    }
+
+    // Keep objectUrl alive for fallback modal
     setTimeout(() => {
       try {
         URL.revokeObjectURL(objectUrl);
       } catch (e) {}
-    }, 60000); // 60 seconds
+    }, 60000);
 
     return {
-      success: false,
-      method: 'long-press-fallback',
-      message: 'Automatic download prevented. Use the "Long-press to Save Video" preview.',
+      success: openedTab,
+      method: openedTab ? 'new-tab-fallback' : 'long-press-fallback',
+      message: openedTab
+        ? 'Video opened in new tab! Tap and hold to save directly to gallery.'
+        : 'Automatic download prevented. Use the "Long-press to Save Video" preview.',
       blobUrl: objectUrl,
-      blob: mp4Blob,
+      blob: finalBlob,
       fileName: safeFileName,
       needsLongPressModal: true,
     };

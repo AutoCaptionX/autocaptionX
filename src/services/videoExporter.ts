@@ -6,6 +6,7 @@ import {
   findActivePhraseIndex,
 } from '../utils/captionConverters';
 import { sanitizeAndEnforceMonotonic } from '../utils/audioExtractor';
+import { renderSubtitlesOnCanvas, disposeSubtitleRenderer } from '../utils/subtitleCanvasRenderer';
 
 export interface RenderProgressCallback {
   (percentage: number, statusText: string): void;
@@ -59,7 +60,7 @@ export async function renderCaptionedVideo(
 
     const cleanup = () => {
       if (animId) cancelAnimationFrame(animId);
-      if (checkIntervalId) clearInterval(checkIntervalId);
+      disposeSubtitleRenderer();
       if (videoEl) {
         videoEl.ontimeupdate = null;
         videoEl.onended = null;
@@ -245,41 +246,72 @@ export async function renderCaptionedVideo(
         reject(recErr);
       };
 
-      // 5. High-Precision Render Loop
+      // 5. Frame-Rate Throttled High-Precision Render Loop
+      const targetFps = 30;
+      const frameIntervalMs = 1000 / targetFps; // ~33.33ms per frame
+      let lastDrawTimestamp = 0;
       let isDrawing = false;
-      const drawFrame = () => {
-        if (isCompleted || isDrawing) return;
-        isDrawing = true;
 
-        try {
-          // Check if video has reached its real complete end
-          if (video.ended || (video.currentTime >= totalVideoDuration - 0.05 && video.currentTime > 0.5)) {
-            ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-            const curMs = Math.round(video.currentTime * 1000);
-            const pIdx = findActivePhraseIndex(phrases, curMs);
-            if (pIdx !== -1) {
-              renderSubtitlesOnCanvas(ctx, phrases[pIdx], curMs, preset, targetWidth, targetHeight);
-            }
-
-            onProgress?.(99, 'Finalizing video stream...');
-            setTimeout(finishExport, 250);
-            return;
-          }
-
-          // Draw current video frame to canvas
+      const renderCurrentFrame = () => {
+        // Check if video has reached its real complete end
+        if (video.ended || (video.currentTime >= totalVideoDuration - 0.05 && video.currentTime > 0.5)) {
           ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-
-          // Find active subtitle with binary search and burn it onto canvas
           const curMs = Math.round(video.currentTime * 1000);
           const pIdx = findActivePhraseIndex(phrases, curMs);
           if (pIdx !== -1) {
-            renderSubtitlesOnCanvas(ctx, phrases[pIdx], curMs, preset, targetWidth, targetHeight);
+            renderSubtitlesOnCanvas({
+              ctx,
+              phrase: phrases[pIdx],
+              curMs,
+              preset,
+              width: targetWidth,
+              height: targetHeight,
+            });
           }
 
-          const pct = Math.min(98, Math.round((video.currentTime / Math.max(1, totalVideoDuration)) * 85) + 12);
-          onProgress?.(pct, `Burning captions into video... (${Math.round(video.currentTime)}s / ${Math.round(totalVideoDuration)}s)`);
-        } finally {
-          isDrawing = false;
+          onProgress?.(99, 'Finalizing video stream...');
+          setTimeout(finishExport, 200);
+          return true;
+        }
+
+        // Draw current video frame to canvas
+        ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+
+        // Find active subtitle with binary search and burn it onto canvas using optimized offscreen cache
+        const curMs = Math.round(video.currentTime * 1000);
+        const pIdx = findActivePhraseIndex(phrases, curMs);
+        if (pIdx !== -1) {
+          renderSubtitlesOnCanvas({
+            ctx,
+            phrase: phrases[pIdx],
+            curMs,
+            preset,
+            width: targetWidth,
+            height: targetHeight,
+          });
+        }
+
+        const pct = Math.min(98, Math.round((video.currentTime / Math.max(1, totalVideoDuration)) * 85) + 12);
+        onProgress?.(pct, `Burning captions into video... (${Math.round(video.currentTime)}s / ${Math.round(totalVideoDuration)}s)`);
+        return false;
+      };
+
+      // Throttled animation loop synchronized to video frame rate
+      const drawFrame = (timestamp: number) => {
+        if (isCompleted) return;
+
+        const elapsed = timestamp - lastDrawTimestamp;
+        if (elapsed >= frameIntervalMs) {
+          lastDrawTimestamp = timestamp - (elapsed % frameIntervalMs);
+          if (!isDrawing) {
+            isDrawing = true;
+            try {
+              const reachedEnd = renderCurrentFrame();
+              if (reachedEnd) return;
+            } finally {
+              isDrawing = false;
+            }
+          }
         }
 
         if (!isCompleted) {
@@ -292,19 +324,19 @@ export async function renderCaptionedVideo(
       video.currentTime = 0;
 
       video.onended = () => {
-        setTimeout(finishExport, 200);
+        setTimeout(finishExport, 150);
       };
 
-      await video.play();
-      animId = requestAnimationFrame(drawFrame);
-
-      // Safety check interval to ensure rendering never stalls if RAF throttles
-      checkIntervalId = setInterval(() => {
+      // Non-blocking completion listener on video timeupdate
+      video.ontimeupdate = () => {
         if (isCompleted) return;
         if (video.ended || (video.currentTime >= totalVideoDuration - 0.05 && video.currentTime > 0.5)) {
           finishExport();
         }
-      }, 500);
+      };
+
+      await video.play();
+      animId = requestAnimationFrame(drawFrame);
 
     } catch (err) {
       cleanup();
@@ -313,199 +345,3 @@ export async function renderCaptionedVideo(
   });
 }
 
-// Helper to draw styled subtitle presets directly onto the video canvas with multi-line wrap
-function renderSubtitlesOnCanvas(
-  ctx: CanvasRenderingContext2D,
-  phrase: { words: CaptionWord[]; start: number; end: number },
-  curMs: number,
-  preset: CaptionPreset,
-  width: number,
-  height: number
-) {
-  if (!phrase || !phrase.words || phrase.words.length === 0) return;
-
-  ctx.save();
-
-  const isVertical = height > width;
-  const totalChars = phrase.words.reduce((sum, item) => sum + (item.text || '').length, 0);
-  const charScale = totalChars > 22 ? 0.85 : 1;
-  const baseFontSize = isVertical
-    ? Math.max(20, Math.round(width * 0.052 * charScale))
-    : Math.max(22, Math.round(height * 0.062 * charScale));
-  const posY = height * 0.85; // Lower-third (bottom: 15%)
-
-  // Active word index matching audio waveform precisely with zero latency
-  let activeWordIdx = -1;
-  for (let i = 0; i < phrase.words.length; i++) {
-    const w = phrase.words[i];
-    const nextW = phrase.words[i + 1];
-
-    if (curMs >= w.start && curMs <= w.end) {
-      activeWordIdx = i;
-      break;
-    }
-
-    // Micro-pause cadence between words within phrase (< 250ms)
-    if (nextW && curMs > w.end && curMs < nextW.start && (nextW.start - w.end) <= 250) {
-      activeWordIdx = i;
-      break;
-    }
-  }
-
-  const fontFamily =
-    preset === 'hormozi'
-      ? 'Montserrat, Impact, Arial, sans-serif'
-      : preset === 'beast'
-      ? 'Poppins, Arial Black, sans-serif'
-      : 'Plus Jakarta Sans, sans-serif';
-
-  ctx.font = `900 ${baseFontSize}px ${fontFamily}`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-
-  const spacing = isVertical ? Math.round(width * 0.02) : Math.round(width * 0.015);
-  const maxLineWidth = width * 0.82;
-
-  // Measure all words with styles
-  const wordMetrics = phrase.words.map((w, idx) => {
-    const text = w.text;
-    const isCurrent = activeWordIdx !== -1 && idx === activeWordIdx;
-    const fontSize = isCurrent ? Math.round(baseFontSize * 1.15) : baseFontSize;
-    ctx.font = `900 ${fontSize}px ${fontFamily}`;
-    const textWidth = ctx.measureText(text).width;
-    return { text, textWidth, fontSize, isCurrent, idx };
-  });
-
-  // Split words into lines if needed so they never push off screen
-  const lines: Array<typeof wordMetrics> = [];
-  let currentLine: typeof wordMetrics = [];
-  let currentLineWidth = 0;
-
-  for (const item of wordMetrics) {
-    const itemTotal = item.textWidth + (currentLine.length > 0 ? spacing : 0);
-    if (currentLine.length > 0 && currentLineWidth + itemTotal > maxLineWidth) {
-      lines.push(currentLine);
-      currentLine = [item];
-      currentLineWidth = item.textWidth;
-    } else {
-      currentLine.push(item);
-      currentLineWidth += itemTotal;
-    }
-  }
-  if (currentLine.length > 0) {
-    lines.push(currentLine);
-  }
-
-  // Calculate pill dimensions covering all lines
-  const lineHeight = Math.round(baseFontSize * 1.45);
-  const totalContentHeight = lines.length * lineHeight;
-  const maxLineW = Math.max(...lines.map((l) => l.reduce((s, w) => s + w.textWidth, 0) + (l.length - 1) * spacing));
-
-  const paddingX = Math.round(baseFontSize * 0.85);
-  const paddingY = Math.round(baseFontSize * 0.45);
-  const pillWidth = maxLineW + paddingX * 2;
-  const pillHeight = totalContentHeight + paddingY * 2;
-  const pillX = (width - pillWidth) / 2;
-  const pillY = posY - pillHeight / 2;
-  const borderRadius = Math.round(baseFontSize * 0.35);
-
-  // Background Box
-  ctx.beginPath();
-  ctx.roundRect(pillX, pillY, pillWidth, pillHeight, borderRadius);
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.88)';
-  ctx.fill();
-  ctx.lineWidth = Math.max(1.5, Math.round(baseFontSize * 0.04));
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-  ctx.stroke();
-
-  // Draw lines
-  let startLineY = pillY + paddingY + lineHeight / 2;
-
-  lines.forEach((lineWords) => {
-    const lineWidth = lineWords.reduce((s, w) => s + w.textWidth, 0) + (lineWords.length - 1) * spacing;
-    let curX = (width - lineWidth) / 2;
-
-    lineWords.forEach((w) => {
-      const wordCenterX = curX + w.textWidth / 2;
-      ctx.font = `900 ${w.fontSize}px ${fontFamily}`;
-
-      if (preset === 'hormozi') {
-        if (w.isCurrent) {
-          // Glowing Active Box
-          const hlPaddingX = Math.round(w.fontSize * 0.22);
-          const hlPaddingY = Math.round(w.fontSize * 0.12);
-          const hlW = w.textWidth + hlPaddingX * 2;
-          const hlH = w.fontSize * 1.3;
-          const hlX = curX - hlPaddingX;
-          const hlY = startLineY - hlH / 2;
-
-          ctx.beginPath();
-          ctx.roundRect(hlX, hlY, hlW, hlH, Math.round(w.fontSize * 0.2));
-          ctx.fillStyle = 'rgba(234, 179, 8, 0.35)';
-          ctx.fill();
-
-          // Active Word (Bright Yellow)
-          ctx.fillStyle = '#fde047';
-          ctx.shadowColor = 'rgba(234, 179, 8, 0.85)';
-          ctx.shadowBlur = Math.round(w.fontSize * 0.3);
-        } else {
-          ctx.fillStyle = '#ffffff';
-          ctx.shadowColor = 'transparent';
-          ctx.shadowBlur = 0;
-        }
-        ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
-        ctx.strokeStyle = '#000000';
-        ctx.strokeText(w.text, wordCenterX, startLineY);
-        ctx.fillText(w.text, wordCenterX, startLineY);
-
-      } else if (preset === 'neon') {
-        if (w.isCurrent) {
-          ctx.fillStyle = '#67e8f9';
-          ctx.shadowColor = 'rgba(34, 211, 238, 0.95)';
-          ctx.shadowBlur = Math.round(w.fontSize * 0.4);
-        } else {
-          ctx.fillStyle = '#ffffff';
-          ctx.shadowColor = 'transparent';
-          ctx.shadowBlur = 0;
-        }
-        ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
-        ctx.strokeStyle = '#000000';
-        ctx.strokeText(w.text, wordCenterX, startLineY);
-        ctx.fillText(w.text, wordCenterX, startLineY);
-
-      } else if (preset === 'beast') {
-        if (w.isCurrent) {
-          ctx.fillStyle = '#4ade80';
-          ctx.shadowColor = 'rgba(74, 222, 128, 0.9)';
-          ctx.shadowBlur = Math.round(w.fontSize * 0.35);
-        } else {
-          ctx.fillStyle = '#ffffff';
-          ctx.shadowColor = 'transparent';
-          ctx.shadowBlur = 0;
-        }
-        ctx.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
-        ctx.strokeStyle = '#000000';
-        ctx.strokeText(w.text, wordCenterX, startLineY);
-        ctx.fillText(w.text, wordCenterX, startLineY);
-
-      } else {
-        // Clean Preset
-        if (w.isCurrent) {
-          ctx.fillStyle = '#38bdf8';
-        } else {
-          ctx.fillStyle = '#ffffff';
-        }
-        ctx.lineWidth = Math.max(1.5, Math.round(w.fontSize * 0.05));
-        ctx.strokeStyle = '#000000';
-        ctx.strokeText(w.text, wordCenterX, startLineY);
-        ctx.fillText(w.text, wordCenterX, startLineY);
-      }
-
-      curX += w.textWidth + spacing;
-    });
-
-    startLineY += lineHeight;
-  });
-
-  ctx.restore();
-}

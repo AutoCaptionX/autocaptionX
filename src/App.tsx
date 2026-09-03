@@ -173,42 +173,56 @@ export default function App() {
     recorder.start();
     let frame = 0;
     const maxFrames = 180; // 6 seconds at 30fps
+    let animId = 0;
+    let lastTime = 0;
+    const frameInterval = 1000 / 30;
 
-    const interval = setInterval(() => {
-      frame++;
-      const grad = ctx.createLinearGradient(0, 0, 720, 1280);
-      grad.addColorStop(0, '#0f172a');
-      grad.addColorStop(0.5, '#1e1b4b');
-      grad.addColorStop(1, '#0f172a');
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, 720, 1280);
+    const drawDemoLoop = (timestamp: number) => {
+      const elapsed = timestamp - lastTime;
+      if (elapsed >= frameInterval) {
+        lastTime = timestamp - (elapsed % frameInterval);
+        frame++;
 
-      ctx.beginPath();
-      ctx.arc(360, 340, 60 + Math.sin(frame * 0.1) * 5, 0, Math.PI * 2);
-      ctx.fillStyle = '#3b82f6';
-      ctx.fill();
-      ctx.lineWidth = 4;
-      ctx.strokeStyle = '#60a5fa';
-      ctx.stroke();
+        const grad = ctx.createLinearGradient(0, 0, 720, 1280);
+        grad.addColorStop(0, '#0f172a');
+        grad.addColorStop(0.5, '#1e1b4b');
+        grad.addColorStop(1, '#0f172a');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 720, 1280);
 
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 22px system-ui';
-      ctx.textAlign = 'center';
-      ctx.fillText('AutoCaptionX Demo', 360, 233);
+        ctx.beginPath();
+        ctx.arc(360, 340, 60 + Math.sin(frame * 0.1) * 5, 0, Math.PI * 2);
+        ctx.fillStyle = '#3b82f6';
+        ctx.fill();
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#60a5fa';
+        ctx.stroke();
 
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '28px system-ui';
-      ctx.fillText('Viral Subtitles AI Engine', 360, 480);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 22px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText('AutoCaptionX Demo', 360, 233);
 
-      ctx.fillStyle = '#38bdf8';
-      ctx.font = 'bold 36px system-ui';
-      ctx.fillText('Voice-to-Subtitles', 360, 540);
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '28px system-ui';
+        ctx.fillText('Viral Subtitles AI Engine', 360, 480);
 
-      if (frame >= maxFrames) {
-        clearInterval(interval);
-        recorder.stop();
+        ctx.fillStyle = '#38bdf8';
+        ctx.font = 'bold 36px system-ui';
+        ctx.fillText('Voice-to-Subtitles', 360, 540);
+
+        if (frame >= maxFrames) {
+          cancelAnimationFrame(animId);
+          recorder.stop();
+          canvas.width = 0;
+          canvas.height = 0;
+          return;
+        }
       }
-    }, 1000 / 30);
+      animId = requestAnimationFrame(drawDemoLoop);
+    };
+
+    animId = requestAnimationFrame(drawDemoLoop);
   };
 
   // Handle File Removal

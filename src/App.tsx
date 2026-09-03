@@ -239,38 +239,39 @@ export default function App() {
     try {
       let data: any = null;
 
-      // 1. Direct AssemblyAI Multilingual Engine (Word-level timestamps, Hindi / Multilingual detection)
+      // 1. Sequential Audio Chunking Engine (10-15s segments with cumulative offset & timeout prevention)
       try {
-        const directResult = await transcribeDirectAssemblyAI(
+        setGenerationStatusText('Splitting audio into 10-15s segments...');
+        const streamResult = await transcribeAudioChunksStream(
           selectedFile,
           activeKey,
           languageMode,
-          (curProgress) => {
+          (curProgress, statusText) => {
             setProgress(curProgress);
-            setGenerationStatusText(`Transcribing audio... ${curProgress}%`);
+            if (statusText) setGenerationStatusText(statusText);
           },
           videoDurationMs
         );
-        data = directResult;
-      } catch (directErr: any) {
-        console.warn('Direct AssemblyAI notice:', directErr?.message || directErr);
+        data = streamResult;
+      } catch (streamErr: any) {
+        console.warn('Sequential chunk transcription notice:', streamErr?.message || streamErr);
 
-        // 2. Fallback to Streaming Audio Chunking Engine
+        // 2. Fallback to Direct AssemblyAI Multilingual Engine
         try {
-          setGenerationStatusText('Processing audio chunks...');
-          const streamResult = await transcribeAudioChunksStream(
+          setGenerationStatusText('Analyzing full audio track...');
+          const directResult = await transcribeDirectAssemblyAI(
             selectedFile,
             activeKey,
             languageMode,
-            (curProgress, statusText) => {
+            (curProgress) => {
               setProgress(curProgress);
-              if (statusText) setGenerationStatusText(statusText);
+              setGenerationStatusText(`Transcribing audio... ${curProgress}%`);
             },
             videoDurationMs
           );
-          data = streamResult;
-        } catch (streamErr: any) {
-          console.warn('Streaming chunk transcription notice:', streamErr?.message || streamErr);
+          data = directResult;
+        } catch (directErr: any) {
+          console.warn('Direct AssemblyAI notice:', directErr?.message || directErr);
 
           // 3. Fallback to Browser Speech Recognition API
           if (videoBlobUrl) {

@@ -883,10 +883,11 @@ Return a JSON object strictly matching:
               }
 
               if (status === 'completed' && resultData && resultData.words && resultData.words.length > 0) {
+                const startOffsetMs = Number(req.body.startOffsetMs) || 0;
                 const rawWords = resultData.words.map((w: any) => ({
                   text: String(w.text || '').trim(),
-                  start: Math.round(Number(w.start) || 0),
-                  end: Math.round(Number(w.end) || 0),
+                  start: Math.round(Number(w.start) || 0) + startOffsetMs,
+                  end: Math.round(Number(w.end) || 0) + startOffsetMs,
                   confidence: w.confidence ?? 0.98,
                 }));
 

@@ -14,9 +14,43 @@ export async function decodeAudioBufferFromFile(file: Blob | File): Promise<Audi
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     if (!AudioContextClass) return null;
 
-    const audioCtx = new AudioContextClass({ sampleRate: 16000 });
-    const decodedAudio = await audioCtx.decodeAudioData(arrayBuffer);
-    return decodedAudio;
+    let audioCtx: AudioContext;
+    try {
+      audioCtx = new AudioContextClass();
+    } catch {
+      audioCtx = new AudioContextClass({ sampleRate: 16000 });
+    }
+
+    try {
+      const decodedAudio = await new Promise<AudioBuffer | null>((resolve) => {
+        try {
+          const promise = audioCtx.decodeAudioData(
+            arrayBuffer.slice(0),
+            (buf) => resolve(buf),
+            (err) => {
+              console.warn('[AutoCaptionX Audio] decodeAudioData callback error:', err);
+              resolve(null);
+            }
+          );
+          if (promise && typeof promise.then === 'function') {
+            promise.then((buf) => resolve(buf)).catch((err) => {
+              console.warn('[AutoCaptionX Audio] decodeAudioData promise error:', err);
+              resolve(null);
+            });
+          }
+        } catch (ex) {
+          console.warn('[AutoCaptionX Audio] decodeAudioData exception:', ex);
+          resolve(null);
+        }
+      });
+      return decodedAudio;
+    } finally {
+      try {
+        if (audioCtx.state !== 'closed') {
+          audioCtx.close();
+        }
+      } catch {}
+    }
   } catch (err) {
     console.warn('[AutoCaptionX Audio] AudioContext decoding notice:', err);
     return null;
@@ -246,44 +280,108 @@ export function sliceAudioBuffer(
   }
 }
 
-// Split media file audio into small 6-10 second streaming chunks for long video processing (up to 30 mins)
+// Convert raw Float32Array audio samples into standard 16-bit PCM WAV Blob
+export function float32ArrayToWavBlob(
+  inputData: Float32Array,
+  sourceSampleRate: number,
+  targetSampleRate = 16000
+): Blob {
+  const numChannels = 1; // Mono
+  const sampleRate = targetSampleRate;
+  const format = 1; // PCM
+  const bitDepth = 16;
+
+  let channelData: Float32Array;
+  if (sourceSampleRate !== targetSampleRate) {
+    const ratio = sourceSampleRate / targetSampleRate;
+    const newLength = Math.max(1, Math.round(inputData.length / ratio));
+    channelData = new Float32Array(newLength);
+    for (let i = 0; i < newLength; i++) {
+      const originalIndex = Math.floor(i * ratio);
+      channelData[i] = inputData[originalIndex] || 0;
+    }
+  } else {
+    channelData = inputData;
+  }
+
+  const bytesPerSample = bitDepth / 8;
+  const blockAlign = numChannels * bytesPerSample;
+  const wavBuffer = new ArrayBuffer(44 + channelData.length * bytesPerSample);
+  const view = new DataView(wavBuffer);
+
+  // RIFF Header
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + channelData.length * bytesPerSample, true);
+  writeString(view, 8, 'WAVE');
+  // fmt subchunk
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, format, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitDepth, true);
+  // data subchunk
+  writeString(view, 36, 'data');
+  view.setUint32(40, channelData.length * bytesPerSample, true);
+
+  // PCM samples
+  let offset = 44;
+  for (let i = 0; i < channelData.length; i++) {
+    const s = Math.max(-1, Math.min(1, channelData[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    offset += 2;
+  }
+
+  return new Blob([wavBuffer], { type: 'audio/wav' });
+}
+
+// Split media file audio into small 10-15 second streaming chunks for long video processing (up to 30 mins)
 export async function splitMediaFileIntoAudioChunks(
   file: File | Blob,
-  chunkDurationMs = 8000
+  chunkDurationMs = 12000,
+  targetDurationMs?: number
 ): Promise<AudioChunkSegment[]> {
   try {
     const decodedAudio = await decodeAudioBufferFromFile(file);
     if (!decodedAudio || decodedAudio.duration <= 0) {
-      // Fallback to single chunk if audio cannot be decoded via Web Audio API
-      return [
-        {
-          index: 0,
-          totalChunks: 1,
-          startOffsetMs: 0,
-          endOffsetMs: 10000,
-          durationMs: 10000,
+      // Fallback: if Web Audio API couldn't decode directly, split by estimated duration
+      const totalDur = targetDurationMs && targetDurationMs > 0 ? targetDurationMs : 15000;
+      const numFallbackChunks = Math.max(1, Math.ceil(totalDur / chunkDurationMs));
+      const fallbackChunks: AudioChunkSegment[] = [];
+
+      for (let i = 0; i < numFallbackChunks; i++) {
+        const startOffsetMs = i * chunkDurationMs;
+        const endOffsetMs = Math.min(totalDur, (i + 1) * chunkDurationMs);
+        fallbackChunks.push({
+          index: i,
+          totalChunks: numFallbackChunks,
+          startOffsetMs,
+          endOffsetMs,
+          durationMs: endOffsetMs - startOffsetMs,
           blob: file,
-        },
-      ];
+        });
+      }
+      return fallbackChunks;
     }
 
     const totalDurationMs = Math.round(decodedAudio.duration * 1000);
     const numChunks = Math.max(1, Math.ceil(totalDurationMs / chunkDurationMs));
     const chunks: AudioChunkSegment[] = [];
+    const sourceData = decodedAudio.getChannelData(0);
+    const sampleRate = decodedAudio.sampleRate;
 
     for (let i = 0; i < numChunks; i++) {
       const startOffsetMs = i * chunkDurationMs;
       const endOffsetMs = Math.min(totalDurationMs, (i + 1) * chunkDurationMs);
       const durationMs = endOffsetMs - startOffsetMs;
 
-      const slicedBuffer = sliceAudioBuffer(decodedAudio, startOffsetMs, endOffsetMs);
-      let chunkBlob: Blob;
-
-      if (slicedBuffer) {
-        chunkBlob = audioBufferToWav(slicedBuffer, 16000);
-      } else {
-        chunkBlob = file;
-      }
+      // Slice Float32Array directly - zero AudioContext overhead, zero limits
+      const startSample = Math.max(0, Math.floor((startOffsetMs / 1000) * sampleRate));
+      const endSample = Math.min(sourceData.length, Math.ceil((endOffsetMs / 1000) * sampleRate));
+      const sliceData = sourceData.subarray(startSample, endSample);
+      const chunkBlob = float32ArrayToWavBlob(sliceData, sampleRate, 16000);
 
       chunks.push({
         index: i,
@@ -292,7 +390,6 @@ export async function splitMediaFileIntoAudioChunks(
         endOffsetMs,
         durationMs,
         blob: chunkBlob,
-        audioBuffer: slicedBuffer || undefined,
       });
     }
 
@@ -304,8 +401,8 @@ export async function splitMediaFileIntoAudioChunks(
         index: 0,
         totalChunks: 1,
         startOffsetMs: 0,
-        endOffsetMs: 10000,
-        durationMs: 10000,
+        endOffsetMs: targetDurationMs || 12000,
+        durationMs: targetDurationMs || 12000,
         blob: file,
       },
     ];

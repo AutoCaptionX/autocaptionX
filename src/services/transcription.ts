@@ -657,9 +657,188 @@ export async function transcribeDirectAssemblyAI(
   throw lastError || new Error('Speech not recognized or invalid audio format');
 }
 
-// Streaming Audio Chunking Engine for Long Videos (30s up to 30+ Mins)
-// Splits audio into 6-10s segments, processes in a background async worker loop,
-// and concatenates words onto a continuous millisecond timeline.
+// Transcribes a single 10-15 second audio chunk with AssemblyAI,
+// applying cumulative timestamp offset (chunkStartTime + word.start/end)
+// and extended polling intervals / timeout limits to prevent API timeouts.
+async function transcribeSingleChunkWithAssemblyAI(
+  chunkBlob: Blob,
+  keysToTry: string[],
+  languageMode: CaptionLanguageMode,
+  chunkStartTimeMs: number,
+  chunkDurationMs: number
+): Promise<CaptionWord[]> {
+  for (let kIdx = 0; kIdx < keysToTry.length; kIdx++) {
+    const activeKey = keysToTry[kIdx];
+    try {
+      // 1. Direct CORS upload of chunk WAV blob to AssemblyAI
+      const uploadResponse = await fetch('https://api.assemblyai.com/v2/upload', {
+        method: 'POST',
+        headers: {
+          'Authorization': activeKey,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: chunkBlob,
+      });
+
+      if (!uploadResponse.ok) {
+        throw new Error(`Upload status ${uploadResponse.status}`);
+      }
+
+      const uploadData = (await uploadResponse.json()) as { upload_url: string };
+      if (!uploadData.upload_url) {
+        throw new Error('Missing upload_url');
+      }
+
+      // 2. Submit transcription job for chunk
+      const transcriptPayload: any = {
+        audio_url: uploadData.upload_url,
+        punctuate: true,
+        format_text: true,
+        filter_profanity: false,
+      };
+
+      if (languageMode === 'hindi') {
+        transcriptPayload.language_code = 'hi';
+      } else {
+        transcriptPayload.language_detection = true;
+      }
+
+      const transcriptResponse = await fetch('https://api.assemblyai.com/v2/transcript', {
+        method: 'POST',
+        headers: {
+          'Authorization': activeKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(transcriptPayload),
+      });
+
+      if (!transcriptResponse.ok) {
+        throw new Error(`Transcript status ${transcriptResponse.status}`);
+      }
+
+      const transcriptData = (await transcriptResponse.json()) as { id: string };
+      const transcriptId = transcriptData.id;
+      if (!transcriptId) throw new Error('Missing transcript id');
+
+      // 3. Poll with increased interval (2000ms) and generous timeout limit (60 attempts = 120s per chunk)
+      let attempts = 0;
+      const maxAttempts = 60;
+
+      while (attempts < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        attempts++;
+
+        const pollResponse = await fetch(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
+          headers: { Authorization: activeKey },
+        });
+
+        if (!pollResponse.ok) continue;
+
+        const pollData = (await pollResponse.json()) as any;
+
+        if (pollData.status === 'completed') {
+          const rawWords: any[] = pollData.words || [];
+          const offsetWords: CaptionWord[] = rawWords
+            .map((w: any) => {
+              const rawStart = Math.round(Number(w.start) || 0);
+              const rawEnd = Math.round(Number(w.end) || 0);
+              // CUMULATIVE TIMESTAMP OFFSET:
+              // chunkStartTime + word.start, chunkStartTime + word.end
+              const start = chunkStartTimeMs + rawStart;
+              const end = Math.max(start + 50, chunkStartTimeMs + rawEnd);
+              return {
+                text: String(w.text || '').trim(),
+                start,
+                end,
+                confidence: Number(w.confidence) || 0.98,
+              };
+            })
+            .filter((w: CaptionWord) => w.text.length > 0);
+
+          // If words array is empty but text was detected in chunk
+          if (offsetWords.length === 0 && pollData.text && pollData.text.trim().length > 0) {
+            const splitWords = pollData.text.trim().split(/\s+/).filter(Boolean);
+            const wordDur = Math.max(120, Math.round(chunkDurationMs / Math.max(1, splitWords.length)));
+            splitWords.forEach((txt: string, idx: number) => {
+              const s = chunkStartTimeMs + idx * wordDur;
+              const e = Math.min(chunkStartTimeMs + chunkDurationMs, s + wordDur - 20);
+              offsetWords.push({
+                text: txt,
+                start: s,
+                end: Math.max(s + 50, e),
+                confidence: 0.95,
+              });
+            });
+          }
+
+          return offsetWords;
+        }
+
+        if (pollData.status === 'error') {
+          throw new Error(pollData.error || 'AssemblyAI chunk error');
+        }
+      }
+
+      throw new Error('AssemblyAI chunk poll timeout');
+    } catch (chunkErr: any) {
+      console.warn(`Direct AssemblyAI chunk attempt with key index ${kIdx} failed:`, chunkErr.message);
+      // Try next key if available
+    }
+  }
+
+  // Fallback to server endpoint /api/captions/transcribe with increased timeout (90s)
+  try {
+    const formData = new FormData();
+    formData.append('file', chunkBlob, `chunk_${chunkStartTimeMs}.wav`);
+    formData.append('languageMode', languageMode);
+    formData.append('durationMs', String(chunkDurationMs));
+    formData.append('startOffsetMs', String(chunkStartTimeMs));
+
+    const headers: Record<string, string> = {};
+    if (keysToTry.length > 0 && keysToTry[0]) {
+      headers['x-assemblyai-key'] = keysToTry[0];
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90 seconds timeout (NOT 12s)
+
+    const resp = await fetch('/api/captions/transcribe', {
+      method: 'POST',
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
+      body: formData,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data && Array.isArray(data.words) && data.words.length > 0) {
+        return data.words.map((w: any) => {
+          const rawStart = Math.round(Number(w.start) || 0);
+          const rawEnd = Math.round(Number(w.end) || 0);
+          const needsOffset = rawStart < chunkStartTimeMs;
+          const s = needsOffset ? chunkStartTimeMs + rawStart : rawStart;
+          const e = needsOffset ? chunkStartTimeMs + rawEnd : rawEnd;
+          return {
+            text: String(w.text || '').trim(),
+            start: Math.max(0, s),
+            end: Math.max(s + 50, e),
+            confidence: Number(w.confidence) || 0.98,
+          };
+        });
+      }
+    }
+  } catch (serverChunkErr: any) {
+    console.warn('Server chunk transcription notice:', serverChunkErr.message);
+  }
+
+  return [];
+}
+
+// Sequential Audio Chunking Engine for Videos (10-15s chunks with cumulative offsets)
+// Splits audio into 10-15s segments, processes each chunk with AssemblyAI,
+// applies cumulative timestamp offsets (chunkStartTime + word.start),
+// and concatenates words onto a continuous millisecond timeline up to video.duration.
 export async function transcribeAudioChunksStream(
   file: File,
   providedApiKey?: string,
@@ -667,100 +846,70 @@ export async function transcribeAudioChunksStream(
   onProgress?: (progress: number, statusText?: string) => void,
   videoDurationMs?: number
 ): Promise<TranscriptionResult> {
-  onProgress?.(5, 'Parsing video audio track...');
+  onProgress?.(5, 'Splitting audio into 10-15s segments...');
 
-  // Step 1: Split media into small 8-second streaming audio segments
-  const chunks = await splitMediaFileIntoAudioChunks(file, 8000);
+  // 1. Determine active keys to try
+  const customKey = providedApiKey?.trim();
+  const keysToTry: string[] = [];
+  if (customKey && customKey.length > 10) keysToTry.push(customKey);
+  for (const k of DEFAULT_ASSEMBLY_KEYS) {
+    if (!keysToTry.includes(k)) keysToTry.push(k);
+  }
+
+  // 2. Split audio into smaller 10-15 second chunks (12 seconds)
+  const chunkDurationMs = 12000;
+  const chunks = await splitMediaFileIntoAudioChunks(file, chunkDurationMs, videoDurationMs);
   const totalChunks = chunks.length;
 
-  console.log(`[AutoCaptionX Stream] Processing ${totalChunks} audio chunks sequentially...`);
-  onProgress?.(10, `Prepared ${totalChunks} audio segments for transcription...`);
+  console.log(`[AutoCaptionX Stream] Processing ${totalChunks} audio chunks (12s each) sequentially...`);
+  onProgress?.(8, `Prepared ${totalChunks} audio segment${totalChunks > 1 ? 's' : ''} (10-15s each)...`);
 
   const accumulatedWords: CaptionWord[] = [];
-  const chunkTexts: string[] = [];
 
-  // Step 2: Process chunks sequentially in a background async worker loop
+  // 3. Process each chunk sequentially with AssemblyAI and add cumulative timestamp offset
   for (let i = 0; i < totalChunks; i++) {
     const chunk = chunks[i];
     const chunkPercent = Math.round(((i + 1) / totalChunks) * 100);
-    const progressVal = 10 + Math.round(((i + 1) / totalChunks) * 78);
-    onProgress?.(progressVal, `Transcribing... ${chunkPercent}%`);
+    const progressVal = 8 + Math.round(((i + 1) / totalChunks) * 80);
 
-    let chunkWords: CaptionWord[] = [];
-    let chunkText = '';
+    onProgress?.(
+      progressVal,
+      `Transcribing segment ${i + 1}/${totalChunks} (${Math.round(chunk.startOffsetMs / 1000)}s - ${Math.round(chunk.endOffsetMs / 1000)}s)... ${chunkPercent}%`
+    );
 
-    // A. Attempt backend transcription with chunk WAV blob
-    try {
-      const formData = new FormData();
-      formData.append('file', chunk.blob, `chunk_${i}.wav`);
-      formData.append('languageMode', languageMode);
-      formData.append('durationMs', String(chunk.durationMs));
-      formData.append('startOffsetMs', String(chunk.startOffsetMs));
+    const chunkWords = await transcribeSingleChunkWithAssemblyAI(
+      chunk.blob,
+      keysToTry,
+      languageMode,
+      chunk.startOffsetMs,
+      chunk.durationMs
+    );
 
-      const headers: Record<string, string> = {};
-      if (providedApiKey) {
-        headers['x-assemblyai-key'] = providedApiKey;
-      }
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 12000);
-
-      const resp = await fetch('/api/captions/transcribe', {
-        method: 'POST',
-        headers: Object.keys(headers).length > 0 ? headers : undefined,
-        body: formData,
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data && Array.isArray(data.words) && data.words.length > 0) {
-          chunkWords = data.words;
-          chunkText = data.text || '';
-        }
-      }
-    } catch (chunkErr: any) {
-      // If backend chunk call fails, continue to fallback
-    }
-
-    // B. If chunk words found, ensure correct continuous timeline offset
     if (chunkWords.length > 0) {
-      // Check if server already offset or if client should apply offset
-      const firstStart = chunkWords[0].start;
-      const needsOffset = firstStart < chunk.startOffsetMs - 50;
-
-      chunkWords.forEach((w) => {
-        const s = needsOffset ? chunk.startOffsetMs + w.start : w.start;
-        const e = needsOffset ? chunk.startOffsetMs + w.end : w.end;
-        accumulatedWords.push({
-          text: (w.text || '').trim(),
-          start: Math.max(0, Math.round(s)),
-          end: Math.max(Math.round(s) + 80, Math.round(e)),
-          confidence: w.confidence || 0.98,
-        });
-      });
-      if (chunkText) chunkTexts.push(chunkText);
+      accumulatedWords.push(...chunkWords);
     }
 
-    // Yield control to browser main event loop so UI stays fluid and memory is collected
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Yield control to browser main event loop so UI stays fluid
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
 
-  // Step 3: If accumulated words are sparse or chunk API was offline, fallback to full direct engine
+  // 4. If no words detected from chunks, fallback to full direct transcription
   if (accumulatedWords.length === 0) {
     onProgress?.(50, 'Analyzing full audio track...');
-    return transcribeDirectAssemblyAI(file, providedApiKey, languageMode, (pct) => {
-      onProgress?.(pct, `Transcribing... ${pct}%`);
-    }, videoDurationMs);
+    return transcribeDirectAssemblyAI(
+      file,
+      providedApiKey,
+      languageMode,
+      (pct) => onProgress?.(pct, `Transcribing audio... ${pct}%`),
+      videoDurationMs
+    );
   }
 
   onProgress?.(90, 'Aligning continuous timeline & formatting captions...');
 
-  // Step 4: Step-by-step continuous timeline concatenation and cleanup
+  // 5. Polish and translate if needed
   let finalWords = polishCaptionWords(accumulatedWords);
 
-  // Step 5: If English translation is required and words contain Indic script
   if (languageMode === 'translate-en') {
     const hasHindiChars = finalWords.some((w) => /[\u0900-\u097F]/.test(w.text));
     if (hasHindiChars) {
@@ -776,7 +925,7 @@ export async function transcribeAudioChunksStream(
     }));
   }
 
-  // Step 6: Strict continuous timeline monotonicity check across the entire duration (up to 30 mins)
+  // 6. Strict continuous monotonic timeline alignment from 0:00 to video.duration
   const continuousSyncedWords = sanitizeAndEnforceMonotonic(finalWords, videoDurationMs);
 
   onProgress?.(100, 'Captions ready!');
@@ -786,6 +935,6 @@ export async function transcribeAudioChunksStream(
     status: 'completed',
     text: continuousSyncedWords.map((w) => w.text).join(' '),
     words: continuousSyncedWords,
-    source: 'audio-streaming-chunk-engine',
+    source: 'assemblyai-chunked-stream',
   };
 }

@@ -342,6 +342,37 @@ export function float32ArrayToWavBlob(
   return new Blob([wavBuffer], { type: 'audio/wav' });
 }
 
+// Dedicated AudioBuffer chunking function:
+// Processes the audio buffer in 30-second chunks instead of processing the entire audio at once.
+// Prevents memory leaks and maintains consistently fast generation speed.
+export function splitAudioBufferInto30sChunks(
+  audioBuffer: AudioBuffer,
+  chunkSec = 30
+): { index: number; startMs: number; endMs: number; blob: Blob; durationMs: number }[] {
+  const sampleRate = audioBuffer.sampleRate;
+  const channelData = audioBuffer.getChannelData(0);
+  const totalSamples = channelData.length;
+  const chunkSamples = Math.round(chunkSec * sampleRate);
+  const chunks: { index: number; startMs: number; endMs: number; blob: Blob; durationMs: number }[] = [];
+
+  let chunkIndex = 0;
+  for (let offset = 0; offset < totalSamples; offset += chunkSamples) {
+    const end = Math.min(totalSamples, offset + chunkSamples);
+    const slice = channelData.subarray(offset, end);
+    const startMs = Math.round((offset / sampleRate) * 1000);
+    const endMs = Math.round((end / sampleRate) * 1000);
+    const blob = float32ArrayToWavBlob(slice, sampleRate, 16000);
+    chunks.push({
+      index: chunkIndex++,
+      startMs,
+      endMs,
+      durationMs: endMs - startMs,
+      blob,
+    });
+  }
+  return chunks;
+}
+
 // Split media file audio into 30-second streaming chunks with intelligent silence boundary alignment
 // Maintains continuous timing across boundaries so words near the 30s boundary do not lag or skip.
 export async function splitMediaFileIntoAudioChunks(

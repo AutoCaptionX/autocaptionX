@@ -269,129 +269,92 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     const video = videoRef.current;
     if (!video) return;
 
+    // Async Canvas / Overlay Rendering Engine:
+    // Separates caption overlay updates from the video's main playback event loop.
+    // Uses requestAnimationFrame for rendering subtitle graphics instead of running
+    // continuous synchronous DOM updates during the timeupdate event.
     let animFrameId: number | null = null;
-    let rvfcId: number | null = null;
-    let lastRenderedTimeSec = -1;
+    let isPlaying = !video.paused && !video.ended;
 
-    const stopLoop = () => {
-      if (rvfcId !== null && 'cancelVideoFrameCallback' in video) {
-        try {
-          (video as any).cancelVideoFrameCallback(rvfcId);
-        } catch (e) {}
-        rvfcId = null;
-      }
-      if (animFrameId !== null) {
-        cancelAnimationFrame(animFrameId);
-        animFrameId = null;
-      }
-    };
-
-    const renderFrameAtTime = (mediaTimeSec: number) => {
+    const scheduleFrame = (forceParentSync = false) => {
+      if (!video) return;
+      const mediaTimeSec = video.currentTime;
       const curMs = Math.round(mediaTimeSec * 1000);
       drawPreviewFrame(curMs);
-      setCurrentTimeSec(mediaTimeSec);
       syncSubtitleForTimeRef.current(curMs);
 
       const now = performance.now();
-      if (now - lastParentUpdateTimeRef.current > 150) {
+      if (forceParentSync || now - lastParentUpdateTimeRef.current > 200) {
         lastParentUpdateTimeRef.current = now;
+        setCurrentTimeSec(mediaTimeSec);
         onTimeUpdateRef.current?.(curMs);
       }
     };
 
-    // Hardware-synchronized video frame presentation callback
-    const onVideoFrame = (_now: DOMHighResTimeStamp, metadata?: any) => {
-      if (!video || video.paused || video.ended) {
-        stopLoop();
-        return;
-      }
-
-      const mediaTimeSec =
-        metadata && typeof metadata.mediaTime === 'number' ? metadata.mediaTime : video.currentTime;
-      lastRenderedTimeSec = mediaTimeSec;
-      renderFrameAtTime(mediaTimeSec);
-
-      if (!video.paused && !video.ended && 'requestVideoFrameCallback' in video) {
-        rvfcId = (video as any).requestVideoFrameCallback(onVideoFrame);
-      } else {
-        stopLoop();
-      }
-    };
-
-    // Constant FPS animation loop driven directly by video.currentTime
     const renderLoop = () => {
-      if (!video || video.paused || video.ended) {
-        stopLoop();
+      if (!isPlaying || !video || video.paused || video.ended) {
+        animFrameId = null;
         return;
       }
-
-      const currentSec = video.currentTime;
-      // Redraw whenever video time advances or actively playing
-      if (currentSec !== lastRenderedTimeSec || !video.paused) {
-        lastRenderedTimeSec = currentSec;
-        renderFrameAtTime(currentSec);
-      }
-
-      if (!video.paused && !video.ended) {
-        animFrameId = requestAnimationFrame(renderLoop);
-      } else {
-        stopLoop();
-      }
+      scheduleFrame(false);
+      animFrameId = requestAnimationFrame(renderLoop);
     };
 
-    const handlePlay = () => {
-      stopLoop();
-      lastRenderedTimeSec = -1;
-      if ('requestVideoFrameCallback' in video) {
-        rvfcId = (video as any).requestVideoFrameCallback(onVideoFrame);
-      } else {
+    const startPlaybackLoop = () => {
+      isPlaying = true;
+      if (!animFrameId) {
         animFrameId = requestAnimationFrame(renderLoop);
       }
     };
 
-    const handlePauseOrEnded = () => {
-      stopLoop();
-      renderFrameAtTime(video.currentTime);
-      onTimeUpdateRef.current?.(Math.round(video.currentTime * 1000));
+    const stopPlaybackLoop = () => {
+      isPlaying = false;
+      if (animFrameId) {
+        cancelAnimationFrame(animFrameId);
+        animFrameId = null;
+      }
+      // Render final accurate paused frame asynchronously
+      requestAnimationFrame(() => scheduleFrame(true));
     };
 
+    // Non-blocking timeupdate handler: does not block the video decoding thread
     const handleTimeUpdate = () => {
-      if (video.paused) {
-        renderFrameAtTime(video.currentTime);
+      if (video.paused || video.ended) {
+        requestAnimationFrame(() => scheduleFrame(true));
       }
     };
 
-    const handleSeeked = () => {
-      renderFrameAtTime(video.currentTime);
-      onTimeUpdateRef.current?.(Math.round(video.currentTime * 1000));
+    const handleSeek = () => {
+      requestAnimationFrame(() => scheduleFrame(true));
     };
 
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
     video.addEventListener('durationchange', handleLoadedMetadata);
-    video.addEventListener('play', handlePlay);
-    video.addEventListener('playing', handlePlay);
-    video.addEventListener('pause', handlePauseOrEnded);
-    video.addEventListener('ended', handlePauseOrEnded);
-    video.addEventListener('waiting', stopLoop);
-    video.addEventListener('seeked', handleSeeked);
-    video.addEventListener('seeking', handleSeeked);
+    video.addEventListener('play', startPlaybackLoop);
+    video.addEventListener('playing', startPlaybackLoop);
+    video.addEventListener('pause', stopPlaybackLoop);
+    video.addEventListener('ended', stopPlaybackLoop);
+    video.addEventListener('seeked', handleSeek);
+    video.addEventListener('seeking', handleSeek);
     video.addEventListener('timeupdate', handleTimeUpdate);
 
     // Initial paint of single frame
-    drawPreviewFrame(Math.round(video.currentTime * 1000));
+    requestAnimationFrame(() => scheduleFrame(true));
 
     return () => {
-      stopLoop();
+      if (animFrameId) {
+        cancelAnimationFrame(animFrameId);
+        animFrameId = null;
+      }
       disposeSubtitleRenderer();
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
       video.removeEventListener('durationchange', handleLoadedMetadata);
-      video.removeEventListener('play', handlePlay);
-      video.removeEventListener('playing', handlePlay);
-      video.removeEventListener('pause', handlePauseOrEnded);
-      video.removeEventListener('ended', handlePauseOrEnded);
-      video.removeEventListener('waiting', stopLoop);
-      video.removeEventListener('seeked', handleSeeked);
-      video.removeEventListener('seeking', handleSeeked);
+      video.removeEventListener('play', startPlaybackLoop);
+      video.removeEventListener('playing', startPlaybackLoop);
+      video.removeEventListener('pause', stopPlaybackLoop);
+      video.removeEventListener('ended', stopPlaybackLoop);
+      video.removeEventListener('seeked', handleSeek);
+      video.removeEventListener('seeking', handleSeek);
       video.removeEventListener('timeupdate', handleTimeUpdate);
     };
   }, [drawPreviewFrame]);

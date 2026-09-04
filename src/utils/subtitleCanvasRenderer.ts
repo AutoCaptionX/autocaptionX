@@ -398,13 +398,12 @@ export function renderSubtitlesOnCanvas({
     if (preset === 'hormozi') {
       if (isCurrent) {
         offscreenCtx.fillStyle = '#fde047';
-        offscreenCtx.shadowColor = 'rgba(234, 179, 8, 0.65)';
-        offscreenCtx.shadowBlur = Math.min(6, Math.round(fontSize * 0.2));
       } else {
         offscreenCtx.fillStyle = '#ffffff';
-        offscreenCtx.shadowColor = 'transparent';
-        offscreenCtx.shadowBlur = 0;
       }
+      // Force off heavy shadowBlur filter during real-time video playback to prevent main thread blocking
+      offscreenCtx.shadowColor = 'transparent';
+      offscreenCtx.shadowBlur = 0;
       offscreenCtx.lineWidth = Math.max(2, Math.round(fontSize * 0.08));
       offscreenCtx.strokeStyle = '#000000';
       offscreenCtx.strokeText(w.text, w.wordCenterX, w.lineY);
@@ -413,13 +412,12 @@ export function renderSubtitlesOnCanvas({
     } else if (preset === 'neon') {
       if (isCurrent) {
         offscreenCtx.fillStyle = '#67e8f9';
-        offscreenCtx.shadowColor = 'rgba(34, 211, 238, 0.7)';
-        offscreenCtx.shadowBlur = Math.min(8, Math.round(fontSize * 0.25));
       } else {
         offscreenCtx.fillStyle = '#ffffff';
-        offscreenCtx.shadowColor = 'transparent';
-        offscreenCtx.shadowBlur = 0;
       }
+      // Force off heavy shadowBlur filter during real-time video playback to prevent main thread blocking
+      offscreenCtx.shadowColor = 'transparent';
+      offscreenCtx.shadowBlur = 0;
       offscreenCtx.lineWidth = Math.max(2, Math.round(fontSize * 0.08));
       offscreenCtx.strokeStyle = '#000000';
       offscreenCtx.strokeText(w.text, w.wordCenterX, w.lineY);
@@ -428,13 +426,12 @@ export function renderSubtitlesOnCanvas({
     } else if (preset === 'beast') {
       if (isCurrent) {
         offscreenCtx.fillStyle = '#4ade80';
-        offscreenCtx.shadowColor = 'rgba(74, 222, 128, 0.65)';
-        offscreenCtx.shadowBlur = Math.min(8, Math.round(fontSize * 0.2));
       } else {
         offscreenCtx.fillStyle = '#ffffff';
-        offscreenCtx.shadowColor = 'transparent';
-        offscreenCtx.shadowBlur = 0;
       }
+      // Force off heavy shadowBlur filter during real-time video playback to prevent main thread blocking
+      offscreenCtx.shadowColor = 'transparent';
+      offscreenCtx.shadowBlur = 0;
       offscreenCtx.lineWidth = Math.max(2, Math.round(fontSize * 0.08));
       offscreenCtx.strokeStyle = '#000000';
       offscreenCtx.strokeText(w.text, w.wordCenterX, w.lineY);

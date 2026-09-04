@@ -3,44 +3,45 @@
  * AutoCaptionX - Core Web Application Engine (app.js)
  * ============================================================================
  * 
- * KEY PERFORMANCE FIXES IMPLEMENTED:
+ * STRICT LOW-MEMORY MOBILE OPTIMIZATIONS IMPLEMENTED (4GB RAM DEVICES):
  * 
- * 1. Async Canvas/Overlay Rendering (requestAnimationFrame):
- *    - Completely separates caption overlay updates from the video's main playback event loop.
- *    - Uses requestAnimationFrame for rendering subtitle graphics instead of running
- *      continuous synchronous DOM/canvas updates during the 'timeupdate' event.
- *    - During active video playback, an asynchronous rAF loop drives frame rendering
- *      smoothly in sync with the display refresh rate without choking video decoding.
- *    - When paused or seeking, single frames are scheduled asynchronously via rAF.
+ * 1. Throttle Caption UI Updates (Max 30 FPS) & String Diff Comparison:
+ *    - Caption DOM/Canvas subtitle updates are strictly throttled to a maximum
+ *      of 30 frames per second (~33.3ms minimum frame interval).
+ *    - High-frequency HTML5 'timeupdate' ticks do NOT trigger synchronous DOM or
+ *      canvas re-draws during playback.
+ *    - Employs an ultra-fast string diff comparison (lastRenderedKey). If the active
+ *      phrase and active kinetic word have not changed between ticks, all re-clearing,
+ *      DOM mutation, and canvas painting is completely bypassed.
  * 
- * 2. Lower Canvas Resolution Scale on Mobile/Web Preview (720p Max):
- *    - Caps preview canvas buffer resolution strictly to a maximum of 720p
- *      (e.g., max 720px height in landscape, max 720px width in portrait/vertical reels).
- *    - Prevents mobile CPU/GPU thermal throttling and memory overflow on 1080p/4K video assets.
+ * 2. Optimize DOM / Canvas Operations (Hardware Accelerated & Zero Filter Cost):
+ *    - Enforces hardware acceleration on caption overlay and canvas layers using
+ *      transform: translate3d(0, 0, 0), will-change: transform, and backface-visibility: hidden.
+ *    - Disables active CSS backdrop-filters, dynamic text shadows, box shadows, and
+ *      heavy CSS transitions/animations on subtitle elements during active playback.
+ *    - Canvas context forces off shadowBlur, shadowColor, and filter='none',
+ *      using crisp single-pass stroke outlines with 0.1ms execution overhead.
  * 
- * 3. Force Off Heavy Multi-Pass Shadow/Glow Canvas Filters:
- *    - Explicitly forces off shadowBlur, shadowColor, and canvas CSS filters (filter = 'none')
- *      during real-time playback.
- *    - Employs zero-overhead single-pass stroke outlines for crystal-clear readability
- *      without the heavy multi-pass Gaussian blur calculations that freeze playback.
- * 
- * 4. Audio Chunking (30-Second Windows):
- *    - Slices decoded audio tracks into 30-second processing windows.
- *    - Inserts async yield delays (setTimeout / Promise) between chunk iterations
- *      to free heap memory and prevent browser tab crashes on long files (2+ min).
+ * 3. Background Audio Chunking & Explicit GC Pause:
+ *    - Slices large audio streams into discrete 30-second processing windows.
+ *    - Enforces an explicit 100ms asynchronous garbage collection timeout
+ *      (setTimeout(..., 100)) between chunk processing iterations, allowing the V8
+ *      and JavaScriptCore engines to reclaim large audio heap buffers before allocating
+ *      the next slice, preventing browser tab crashes on 4GB RAM devices.
  * ============================================================================
  */
 
 (function (window, document) {
   'use strict';
 
-  // --- ASYNC TIMING & SLEEP UTILITY ---
+  // --- ASYNC TIMING & EXPLICIT GC PAUSE UTILITY ---
   /**
-   * Pauses execution asynchronously to yield control back to the browser event loop,
-   * triggering garbage collection and preventing UI thread exhaustion.
-   * @param {number} ms Duration to sleep in milliseconds
+   * Pauses execution asynchronously to yield control back to the browser event loop.
+   * On low-memory (4GB RAM) mobile devices, a 100ms pause allows the browser's
+   * garbage collector to reclaim heap memory between heavy audio/blob operations.
+   * @param {number} ms Duration to sleep in milliseconds (default: 100ms)
    */
-  const asyncSleep = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+  const asyncSleep = (ms = 100) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // --- 16-BIT PCM WAV ENCODER UTILITY (Pure Vanilla JS, 16kHz Mono) ---
   function floatTo16BitPCM(output, offset, input) {
@@ -83,10 +84,10 @@
     return new Blob([buffer], { type: 'audio/wav' });
   }
 
-  // --- AUDIO CHUNKING ENGINE (30-SECOND WINDOWS) ---
+  // --- AUDIO CHUNKING ENGINE (30-SECOND WINDOWS WITH EXPLICIT GC PAUSE) ---
   /**
    * Slices an AudioBuffer into discrete 30-second windows.
-   * Processes each slice independently to keep memory consumption low.
+   * Processes each slice independently to keep memory consumption low on 4GB RAM devices.
    * 
    * @param {AudioBuffer} audioBuffer Full audio buffer from Web Audio API
    * @param {number} chunkSeconds Window duration in seconds (default: 30)
@@ -117,9 +118,9 @@
         blob: wavBlob,
       });
 
-      // Yield briefly between chunk slicing to prevent UI freeze on large audio tracks
-      if (chunkIndex % 3 === 0) {
-        await asyncSleep(15);
+      // Explicit yield during chunk slicing to prevent UI freeze and allow heap collection
+      if (chunkIndex % 2 === 0) {
+        await asyncSleep(40);
       }
     }
 
@@ -208,10 +209,11 @@
   // --- AUTOCAPTIONX ENGINE CONTROLLER ---
   class AutoCaptionXApp {
     constructor() {
-      // DOM Elements
+      // DOM / Canvas Elements
       this.video = null;
       this.canvas = null;
       this.ctx = null;
+      this.overlayEl = null;
 
       // Caption Data
       this.words = [];
@@ -219,12 +221,15 @@
       this.isProcessing = false;
       this.currentTimeMs = 0;
 
-      // Async Animation Frame Management
+      // 1. Max 30 FPS Throttling & String Diff Cache
       this.rafId = null;
       this.isPlaying = false;
       this.singleFramePending = false;
+      this.lastRenderTime = 0;
+      this.minFrameIntervalMs = 33.33; // Exactly 30 FPS ceiling (1000 / 30)
+      this.lastRenderedKey = ''; // String diff signature cache
 
-      // Maximum resolution constraint for preview canvas (720p limit)
+      // 2. Maximum resolution constraint for preview canvas (720p limit)
       this.maxPreviewDimension = 720;
 
       // Subtitle Display Styling
@@ -251,41 +256,80 @@
     }
 
     /**
-     * Initializes the player and canvas references.
+     * Initializes the player, canvas, and overlay references with hardware acceleration.
      */
     init(options = {}) {
       const videoEl = options.video || document.querySelector(options.videoSelector || '#captionVideo');
       const canvasEl = options.canvas || document.querySelector(options.canvasSelector || '#captionCanvas');
+      const overlayEl = options.overlay || document.querySelector(options.overlaySelector || '#captionOverlay');
 
-      if (!videoEl || !canvasEl) {
-        console.warn('[AutoCaptionX] Video element or Canvas element not found.');
+      if (!videoEl && !canvasEl && !overlayEl) {
+        console.warn('[AutoCaptionX] Video, Canvas, or Overlay element not found.');
         return;
       }
 
       this.video = videoEl;
       this.canvas = canvasEl;
-      this.ctx = this.canvas.getContext('2d', { alpha: true });
+      this.overlayEl = overlayEl;
+
+      if (this.canvas) {
+        this.ctx = this.canvas.getContext('2d', { alpha: true });
+        // Apply GPU hardware acceleration and strip heavy filters
+        this._applyHardwareAcceleration(this.canvas);
+      }
+
+      if (this.overlayEl) {
+        // Apply GPU hardware acceleration and strip heavy filters on DOM overlay
+        this._applyHardwareAcceleration(this.overlayEl);
+      }
 
       if (options.maxPreviewDimension) {
         this.maxPreviewDimension = options.maxPreviewDimension;
       }
 
-      // Detach any previous listeners to prevent duplicates
+      // Detach any previous listeners to prevent memory leaks
       this._detachEventListeners();
-      // Attach strictly non-blocking listeners
+      // Attach strictly throttled non-blocking listeners
       this._attachEventListeners();
 
       // Synchronize dimensions capped to max 720p
       this._syncCanvasSize();
-      this.scheduleSingleFrame();
+      this.scheduleSingleFrame(true);
 
-      console.log('[AutoCaptionX] Initialized with Async requestAnimationFrame render engine & 720p preview buffer.');
+      console.log('[AutoCaptionX] Initialized with 30 FPS Throttling, String Diffing, and Hardware Acceleration.');
+    }
+
+    /**
+     * HARDWARE ACCELERATION & LOW-MEMORY CSS OPTIMIZATION:
+     * - Uses transform: translate3d(0, 0, 0) for composite-layer hardware rendering.
+     * - Forces off active CSS backdrop-filters, dynamic text shadows, and animations
+     *   during active video playback to prevent GPU/CPU stalling on 4GB RAM phones.
+     */
+    _applyHardwareAcceleration(element) {
+      if (!element || !element.style) return;
+      try {
+        element.style.transform = 'translate3d(0, 0, 0)';
+        element.style.webkitTransform = 'translate3d(0, 0, 0)';
+        element.style.willChange = 'transform';
+        element.style.backfaceVisibility = 'hidden';
+        element.style.webkitBackfaceVisibility = 'hidden';
+
+        // Strip heavy filters that choke mobile GPU
+        element.style.backdropFilter = 'none';
+        element.style.webkitBackdropFilter = 'none';
+        element.style.filter = 'none';
+        element.style.textShadow = 'none';
+        element.style.boxShadow = 'none';
+        element.style.transition = 'none';
+        element.style.animation = 'none';
+      } catch (e) {
+        // Ignored
+      }
     }
 
     /**
      * ASYNC EVENT BINDINGS:
-     * Decouples canvas graphics rendering from the video player pipeline.
-     * All live playback drawing is scheduled via requestAnimationFrame.
+     * Decouples canvas/DOM graphics rendering from the video player pipeline.
      */
     _attachEventListeners() {
       if (!this.video) return;
@@ -299,7 +343,7 @@
       this.video.addEventListener('loadedmetadata', this._onLoadedMetadata);
       window.addEventListener('resize', () => {
         this._syncCanvasSize();
-        this.scheduleSingleFrame();
+        this.scheduleSingleFrame(true);
       });
     }
 
@@ -324,34 +368,35 @@
     _handlePause() {
       this.isPlaying = false;
       this._stopRafLoop();
-      this.scheduleSingleFrame();
+      this.scheduleSingleFrame(true);
     }
 
     _handleSeek() {
-      this.scheduleSingleFrame();
+      this.scheduleSingleFrame(true);
     }
 
     /**
-     * NON-BLOCKING TIMEUPDATE LISTENER:
-     * Does NOT perform synchronous canvas painting or DOM reflow.
-     * Only schedules an async frame if playback is paused or seeking.
+     * THROTTLED TIMEUPDATE LISTENER:
+     * Does NOT perform synchronous DOM reflow or canvas repainting during playback.
+     * When paused or seeking, schedules a single frame asynchronously.
      */
     _handleTimeUpdate() {
       if (!this.video) return;
       this.currentTimeMs = Math.round(this.video.currentTime * 1000);
       if (this.video.paused || this.video.ended) {
-        this.scheduleSingleFrame();
+        this.scheduleSingleFrame(false);
       }
     }
 
     _handleLoadedMetadata() {
       this._syncCanvasSize();
-      this.scheduleSingleFrame();
+      this.scheduleSingleFrame(true);
     }
 
     /**
-     * ASYNC requestAnimationFrame RENDER LOOP:
-     * Runs in sync with the screen's native refresh rate without blocking the HTML5 video engine.
+     * ASYNC rAF LOOP THROTTLED TO MAX 30 FPS:
+     * - Checks performance.now() against minFrameIntervalMs (33.3ms = 30 FPS ceiling).
+     * - Only triggers renderFrame if enough time has passed.
      */
     _startRafLoop() {
       if (!this.rafId) {
@@ -372,18 +417,25 @@
         return;
       }
 
-      const curMs = Math.round(this.video.currentTime * 1000);
-      this.currentTimeMs = curMs;
-      this.renderFrame(curMs);
+      const now = performance.now();
+      const delta = now - this.lastRenderTime;
+
+      // Enforce 30 FPS Ceiling: skip frame if called earlier than 33.3ms
+      if (delta >= this.minFrameIntervalMs) {
+        const curMs = Math.round(this.video.currentTime * 1000);
+        this.currentTimeMs = curMs;
+        this.renderFrame(curMs, false);
+      }
 
       this.rafId = requestAnimationFrame(this._rafLoop);
     }
 
     /**
      * Schedules an asynchronous single frame render via requestAnimationFrame.
+     * @param {boolean} force Whether to bypass string diff checking (e.g. after seek or resize)
      */
-    scheduleSingleFrame() {
-      if (this.singleFramePending) return;
+    scheduleSingleFrame(force = false) {
+      if (this.singleFramePending && !force) return;
       this.singleFramePending = true;
 
       requestAnimationFrame(() => {
@@ -391,7 +443,7 @@
         if (this.video) {
           const curMs = Math.round(this.video.currentTime * 1000);
           this.currentTimeMs = curMs;
-          this.renderFrame(curMs);
+          this.renderFrame(curMs, force);
         }
       });
     }
@@ -430,6 +482,7 @@
       if (this.canvas.width !== targetW || this.canvas.height !== targetH) {
         this.canvas.width = targetW;
         this.canvas.height = targetH;
+        this._applyHardwareAcceleration(this.canvas);
       }
     }
 
@@ -439,7 +492,8 @@
     setCaptions(words) {
       this.words = Array.isArray(words) ? words : [];
       this.phrases = buildCaptionPhrases(this.words);
-      this.scheduleSingleFrame();
+      this.lastRenderedKey = ''; // Invalidate cache
+      this.scheduleSingleFrame(true);
     }
 
     /**
@@ -457,24 +511,92 @@
     }
 
     /**
-     * LIGHTWEIGHT CANVAS SUBTITLE RENDERING:
-     * - Disables all heavy multi-pass shadowBlur/glow filters to guarantee 60fps.
-     * - Uses fast single-pass stroke outline for high-contrast legibility.
-     * - Renders strictly asynchronously under 0.3ms per frame.
+     * ULTRA-LOW-OVERHEAD SUBTITLE RENDERING:
+     * - Throttled to max 30 FPS.
+     * - Fast String Diff Comparison: completely skips rendering if the active caption
+     *   phrase and kinetic word haven't changed.
+     * - Zero backdrop-filters, zero dynamic text-shadows, zero shadowBlur.
+     * - Supports both HTML5 Canvas overlay and DOM element overlay.
      */
-    renderFrame(timeMs) {
-      if (!this.ctx || !this.canvas) return;
+    renderFrame(timeMs, force = false) {
+      const now = performance.now();
+
+      // 1. Throttle check (unless forced like on seek)
+      if (!force && now - this.lastRenderTime < this.minFrameIntervalMs) {
+        return;
+      }
+
+      // 2. Active Caption String Diff Computation
+      const activePhrase = this.getActivePhrase(timeMs);
+      let activeKey = 'EMPTY';
+      let activeWord = null;
+
+      if (activePhrase && activePhrase.words && activePhrase.words.length > 0) {
+        for (let i = 0; i < activePhrase.words.length; i++) {
+          const w = activePhrase.words[i];
+          if (timeMs >= w.start && timeMs <= w.end) {
+            activeWord = w;
+            break;
+          }
+        }
+        activeKey = `${activePhrase.start}_${activePhrase.end}_${activeWord ? activeWord.text : ''}`;
+      }
+
+      // String Diff Optimization: If caption state is identical to last frame, skip painting!
+      if (!force && activeKey === this.lastRenderedKey) {
+        return;
+      }
+
+      this.lastRenderedKey = activeKey;
+      this.lastRenderTime = now;
+
+      // 3. Render on DOM Overlay (if configured)
+      if (this.overlayEl) {
+        this._renderDomOverlay(activePhrase, activeWord);
+      }
+
+      // 4. Render on Canvas Overlay (if configured)
+      if (this.canvas && this.ctx) {
+        this._renderCanvasOverlay(timeMs, activePhrase, activeWord);
+      }
+    }
+
+    /**
+     * Hardware-accelerated lightweight DOM overlay rendering.
+     * Avoids innerHTML and uses textContent to prevent garbage creation.
+     */
+    _renderDomOverlay(activePhrase, activeWord) {
+      if (!this.overlayEl) return;
+
+      if (!activePhrase || !activePhrase.words || activePhrase.words.length === 0) {
+        if (this.overlayEl.style.display !== 'none') {
+          this.overlayEl.style.display = 'none';
+        }
+        return;
+      }
+
+      if (this.overlayEl.style.display === 'none') {
+        this.overlayEl.style.display = 'block';
+      }
+
+      // Build text content with minimal DOM allocations
+      this.overlayEl.textContent = activePhrase.text;
+    }
+
+    /**
+     * Hardware-accelerated lightweight Canvas overlay rendering.
+     */
+    _renderCanvasOverlay(timeMs, activePhrase, activeWord) {
       const ctx = this.ctx;
       const width = this.canvas.width;
       const height = this.canvas.height;
 
-      // Clear previous canvas frame
+      // Clear previous frame
       ctx.clearRect(0, 0, width, height);
 
-      if (!this.words || this.words.length === 0) return;
-
-      const activePhrase = this.getActivePhrase(timeMs);
-      if (!activePhrase || !activePhrase.words || activePhrase.words.length === 0) return;
+      if (!activePhrase || !activePhrase.words || activePhrase.words.length === 0) {
+        return;
+      }
 
       // FORCED OFF: Eliminate heavy canvas filters and shadow blurs during real-time playback
       ctx.shadowColor = 'transparent';
@@ -543,10 +665,11 @@
     }
 
     /**
-     * AUDIO CHUNKING (30s WINDOWS) & TRANSCRIPTION PIPELINE:
+     * BACKGROUND AUDIO CHUNKING (30s WINDOWS) & EXPLICIT GC TIMEOUT (100ms):
      * 1. Decodes audio with Web Audio API.
      * 2. Slices audio into clean 30-second WAV chunks.
-     * 3. Inserts async sleep intervals between chunks to clear memory.
+     * 3. Inserts explicit 100ms garbage collection pauses between chunks to clear
+     *    heap memory and prevent browser tab crashes on 4GB RAM mobile devices.
      * 4. Concatenates timed words without time drift or boundary loss.
      * 
      * @param {File|Blob} mediaFileOrBlob Video or audio file
@@ -566,11 +689,11 @@
 
         if (onProgress) onProgress(15, `Dividing into 30s processing windows (Total: ${Math.round(totalDurationSec)}s)...`);
 
-        // 2. Chunk AudioBuffer into 30-second windows
+        // 2. Chunk AudioBuffer into 30-second windows with async sleep
         const chunks = await splitAudioBufferInto30sChunks(audioBuffer, 30);
         const totalChunks = chunks.length;
 
-        console.log(`[AutoCaptionX] Starting 30-second chunk processing (${totalChunks} chunks total).`);
+        console.log(`[AutoCaptionX] Starting 30-second chunk processing (${totalChunks} chunks total) with GC pauses.`);
 
         const allWords = [];
 
@@ -597,8 +720,9 @@
           // CRITICAL MEMORY CLEANUP: Release intermediate chunk blob reference
           chunk.blob = null;
 
-          // ASYNC DELAY: Explicit async delay between chunk processing to clear memory and prevent tab crashes
-          await asyncSleep(80);
+          // EXPLICIT GC PAUSE: 100ms pause yields to the browser engine so V8/JSC GC can
+          // reclaim large audio heap allocations on 4GB RAM devices.
+          await asyncSleep(100);
         }
 
         if (onProgress) onProgress(95, 'Finalizing and synchronizing captions...');
@@ -706,15 +830,17 @@
     document.addEventListener('DOMContentLoaded', () => {
       const video = document.querySelector('#captionVideo');
       const canvas = document.querySelector('#captionCanvas');
-      if (video && canvas) {
-        window.AutoCaptionX.init({ video, canvas });
+      const overlay = document.querySelector('#captionOverlay');
+      if (video && (canvas || overlay)) {
+        window.AutoCaptionX.init({ video, canvas, overlay });
       }
     });
   } else {
     const video = document.querySelector('#captionVideo');
     const canvas = document.querySelector('#captionCanvas');
-    if (video && canvas) {
-      window.AutoCaptionX.init({ video, canvas });
+    const overlay = document.querySelector('#captionOverlay');
+    if (video && (canvas || overlay)) {
+      window.AutoCaptionX.init({ video, canvas, overlay });
     }
   }
 

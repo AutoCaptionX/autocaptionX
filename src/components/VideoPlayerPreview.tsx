@@ -170,12 +170,42 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     syncSubtitleForTimeRef.current = syncSubtitleForTime;
   }, [syncSubtitleForTime]);
 
+  const lastRenderTimeRef = useRef<number>(0);
+  const lastRenderedKeyRef = useRef<string>('');
+
   // Canvas subtitle frame rendering: clears transparent canvas and renders active caption
   // DOWNSCALED PREVIEW RENDER BUFFER: Capped to max 720p to eliminate CPU/RAM exhaustion and freezing on mobile
-  const drawPreviewFrame = useCallback((targetMs?: number) => {
+  // THROTTLED TO MAX 30 FPS with STRING DIFF COMPARISON to prevent CPU choke during fast-speech sections
+  const drawPreviewFrame = useCallback((targetMs?: number, force = false) => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
+
+    const curMs = typeof targetMs === 'number' ? targetMs : Math.round(video.currentTime * 1000);
+
+    // Compute active subtitle key for string diff comparison
+    let activeKey = 'EMPTY';
+    const pIdx = findActivePhraseIndex(phrases, curMs);
+    if (pIdx !== -1) {
+      const phrase = phrases[pIdx];
+      const activeWord = phrase.words.find((w) => curMs >= w.start && curMs <= w.end);
+      activeKey = `${phrase.start}_${phrase.end}_${activeWord ? activeWord.text : ''}`;
+    }
+
+    const now = performance.now();
+    // 30 FPS Cap (~33.3ms) & String Diff optimization:
+    // If not forced and active caption text hasn't changed or rendering too rapidly, skip expensive redraw
+    if (!force) {
+      if (now - lastRenderTimeRef.current < 33.3) {
+        return;
+      }
+      if (activeKey === lastRenderedKeyRef.current) {
+        return;
+      }
+    }
+
+    lastRenderTimeRef.current = now;
+    lastRenderedKeyRef.current = activeKey;
 
     const ctx = canvas.getContext('2d', { alpha: true });
     if (!ctx) return;
@@ -564,10 +594,17 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
               className="w-full h-full object-contain bg-black z-0"
             />
 
-            {/* Overlay Canvas for Burned-In Animated Subtitles (Pointer-events-none passes clicks directly to native controls) */}
+            {/* Overlay Canvas for Burned-In Animated Subtitles (Hardware-accelerated translate3d layer) */}
             <canvas
               ref={canvasRef}
               id="autocaptionx-subtitle-canvas"
+              style={{
+                transform: 'translate3d(0, 0, 0)',
+                WebkitTransform: 'translate3d(0, 0, 0)',
+                willChange: 'transform',
+                backfaceVisibility: 'hidden',
+                WebkitBackfaceVisibility: 'hidden',
+              }}
               className="absolute inset-0 w-full h-full object-contain pointer-events-none z-10"
             />
 

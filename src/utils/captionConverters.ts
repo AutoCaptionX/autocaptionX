@@ -45,10 +45,67 @@ export interface CaptionPhrase {
 }
 
 /**
+ * Strict Audio-Visual Timestamp Interpolation & Zero-Lag Active Word Finder:
+ * 1. Locks each word's dynamic display start and end precisely to video.currentTime.
+ * 2. If a word timestamp gap is detected during fast speech, automatically snaps the active word
+ *    highlighting forward to match video.currentTime without queuing delay.
+ * 3. Guarantees that active word highlighting tracks the speaker's vocal progression with zero lag.
+ */
+export function getActiveWordIndexForPhrase(
+  words: CaptionWord[],
+  curMs: number,
+  phraseStart?: number,
+  phraseEnd?: number
+): number {
+  if (!words || words.length === 0) return -1;
+  const count = words.length;
+  if (count === 1) return 0;
+
+  const pStart = typeof phraseStart === 'number' ? phraseStart : words[0].start;
+  const pEnd = typeof phraseEnd === 'number' ? phraseEnd : words[count - 1].end;
+
+  // 1. Boundary clamping: lock to first word before start, and to last word at or past end
+  if (curMs <= words[0].start) return 0;
+  if (curMs >= words[count - 1].end) return count - 1;
+
+  // 2. Direct hit check within word boundaries
+  for (let i = 0; i < count; i++) {
+    if (curMs >= words[i].start && curMs <= words[i].end) {
+      return i;
+    }
+  }
+
+  // 3. Fast-speech gap detection & dynamic snap:
+  // If video.currentTime is between words, automatically snap highlighting without queuing lag
+  for (let i = 0; i < count - 1; i++) {
+    const curr = words[i];
+    const next = words[i + 1];
+
+    if (curMs > curr.end && curMs < next.start) {
+      const gapMs = next.start - curr.end;
+      // In fast speech transitions, snap forward to the upcoming word after 35% of gap or 80ms
+      // This ensures the visual highlight leads into the upcoming syllable rather than lagging behind
+      const snapPoint = curr.end + Math.min(80, Math.round(gapMs * 0.35));
+      if (curMs >= snapPoint) {
+        return i + 1;
+      }
+      return i;
+    }
+  }
+
+  // 4. Fallback: Proportional audio-visual timestamp interpolation
+  // Maps video.currentTime progress within phrase duration to word indices
+  const phraseSpan = Math.max(1, pEnd - pStart);
+  const elapsed = Math.max(0, Math.min(phraseSpan, curMs - pStart));
+  const ratio = elapsed / phraseSpan;
+  return Math.max(0, Math.min(count - 1, Math.floor(ratio * count)));
+}
+
+/**
  * Builds continuous caption phrases spanning 100% of the video duration:
  * 1. Full video timeline extension from 0:00 to video.duration.
  * 2. Auto-padding between phrases (endTime of previous caption = startTime of next caption) to eliminate blank screen gaps.
- * 3. Final spoken caption block holds persistence until the exact end timestamp of the video (video.duration).
+ * 3. Applies strict Audio-Visual Timestamp Interpolation to eliminate mid-video gaps and queuing lag.
  */
 export function buildContinuousCaptionPhrases(
   words: CaptionWord[],
@@ -82,13 +139,25 @@ export function buildContinuousCaptionPhrases(
     if (currentGroup.length === 0) return;
     const start = currentGroup[0].start;
     const end = Math.max(start + 80, currentGroup[currentGroup.length - 1].end);
+
+    // Deep clone words and apply intra-phrase interpolation to bridge rapid speech micro-gaps
+    const clonedWords: CaptionWord[] = currentGroup.map((w) => ({ ...w }));
+    for (let j = 0; j < clonedWords.length - 1; j++) {
+      const wCurrent = clonedWords[j];
+      const wNext = clonedWords[j + 1];
+      const gap = wNext.start - wCurrent.end;
+      // If gap in continuous phrase is small (<= 350ms), close the gap to prevent highlight dropout
+      if (gap > 0 && gap <= 350) {
+        wCurrent.end = wNext.start;
+      }
+    }
+
     phrases.push({
       id: phrases.length,
-      // Deep clone words so word timestamps remain strictly untouched
-      words: currentGroup.map((w) => ({ ...w })),
+      words: clonedWords,
       start,
       end,
-      text: currentGroup.map((w) => w.text).join(' '),
+      text: clonedWords.map((w) => w.text).join(' '),
     });
     currentGroup = [];
   };
@@ -121,6 +190,15 @@ export function buildContinuousCaptionPhrases(
       // For longer pauses, keep container visible for a short reading tail (450ms) after last word
       phrases[i].end = Math.min(nextStart, phrases[i].end + 450);
     }
+
+    // Ensure the last word of phrase holds highlighting throughout the phrase's extended reading tail
+    const pWords = phrases[i].words;
+    if (pWords.length > 0) {
+      const lastW = pWords[pWords.length - 1];
+      if (lastW.end < phrases[i].end) {
+        lastW.end = phrases[i].end;
+      }
+    }
   }
 
   // Final phrase hold until video duration or natural reading tail
@@ -129,6 +207,12 @@ export function buildContinuousCaptionPhrases(
     lastPhrase.end = Math.round(videoDurationMs);
   } else {
     lastPhrase.end = lastPhrase.end + 800;
+  }
+  if (lastPhrase.words.length > 0) {
+    const lastW = lastPhrase.words[lastPhrase.words.length - 1];
+    if (lastW.end < lastPhrase.end) {
+      lastW.end = lastPhrase.end;
+    }
   }
 
   return phrases;

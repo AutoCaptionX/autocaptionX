@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Download, Share2, FileText, CheckCircle2, X, ShieldCheck, Smartphone, AlertCircle, Sparkles } from 'lucide-react';
-import { downloadOrSaveVideoFile } from '../utils/fileDownloader';
+import { Download, Share2, FileText, CheckCircle2, X, ShieldCheck, Smartphone, AlertCircle, ExternalLink, Sparkles } from 'lucide-react';
+import { downloadOrSaveVideoFile, shareVideoFile } from '../utils/fileDownloader';
 
 interface ExportPreviewModalProps {
   isOpen: boolean;
@@ -26,38 +26,43 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
   const [fallbackActive, setFallbackActive] = useState(isFallbackMode);
   const [videoUrl, setVideoUrl] = useState<string>('');
 
+  const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent || navigator.vendor || '');
+  const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || navigator.vendor || '');
+
   // Sync prop fallback state
   useEffect(() => {
-    if (isFallbackMode) {
+    if (isFallbackMode || isAndroid) {
       setFallbackActive(true);
     }
-  }, [isFallbackMode]);
+  }, [isFallbackMode, isAndroid]);
 
-  // Prevent memory leaks on Android Chrome: manage single Object URL with 30s delayed revoke
+  // Create persistent Object URL with matching container type
   useEffect(() => {
     if (!renderedVideoBlob) {
       setVideoUrl('');
       return;
     }
 
-    // Convert explicitly to video/mp4 format
-    const mp4Blob = new Blob([renderedVideoBlob], { type: 'video/mp4' });
-    const url = URL.createObjectURL(mp4Blob);
+    const containerType = renderedVideoBlob.type || 'video/mp4';
+    const blobToPlay = new Blob([renderedVideoBlob], { type: containerType });
+    const url = URL.createObjectURL(blobToPlay);
     setVideoUrl(url);
 
     return () => {
-      // 30 seconds delayed revoke to allow mobile gallery writing to complete uninterrupted
+      // Keep ObjectURL alive for 60 seconds to allow seamless playback, sharing, or new tab viewing
       setTimeout(() => {
         try {
           URL.revokeObjectURL(url);
         } catch (e) {}
-      }, 30000);
+      }, 60000);
     };
   }, [renderedVideoBlob]);
 
   if (!isOpen || !renderedVideoBlob) return null;
 
-  const canShare = typeof navigator !== 'undefined' && Boolean(navigator.share && navigator.canShare);
+  const canShare = typeof navigator !== 'undefined' && Boolean(navigator.share);
+  const isWebm = renderedVideoBlob.type.includes('webm');
+  const formatLabel = isWebm ? 'WEBM' : 'MP4';
 
   const handleDownloadAgain = async () => {
     try {
@@ -75,23 +80,17 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
   };
 
   const handleNativeShare = async () => {
-    if (!canShare) return;
+    setShareStatus('Opening device share menu...');
     try {
-      const mp4Blob = new Blob([renderedVideoBlob], { type: 'video/mp4' });
-      const safeName = fileName.replace(/\.[^/.]+$/, '') + '.mp4';
-      const file = new File([mp4Blob], safeName, {
-        type: 'video/mp4',
-        lastModified: Date.now(),
-      });
-      if (navigator.canShare({ files: [file] })) {
-        setShareStatus('Opening device share sheet...');
-        await navigator.share({
-          files: [file],
-          title: 'AutoCaptionX Captioned Video',
-          text: 'Captioned video with burned-in subtitles',
-        });
+      const res = await shareVideoFile(renderedVideoBlob, fileName);
+      if (res.success) {
         setShareStatus('Shared successfully!');
         setTimeout(() => setShareStatus(null), 3000);
+      } else if (res.error === 'cancelled') {
+        setShareStatus(null);
+      } else {
+        setShareStatus(res.error || 'Share not available');
+        setTimeout(() => setShareStatus(null), 3500);
       }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
@@ -102,60 +101,64 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in">
-      <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-fade-in">
+      <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[94vh]">
         
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 bg-slate-900/95">
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-800 bg-slate-900/95 shrink-0">
           <div className="flex items-center gap-2.5">
             <div className={`p-2 rounded-xl border ${
               fallbackActive 
                 ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' 
-                : 'bg-green-500/20 text-green-400 border-green-500/30'
+                : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
             }`}>
-              {fallbackActive ? <AlertCircle className="w-5 h-5" /> : <CheckCircle2 className="w-5 h-5" />}
+              {fallbackActive ? <Smartphone className="w-5 h-5" /> : <CheckCircle2 className="w-5 h-5" />}
             </div>
             <div>
               <h3 className="text-base font-bold text-white flex items-center gap-2">
-                {fallbackActive ? 'Long press video to Save to Gallery' : 'Video Export Ready'}
+                <span>Captioned Video Ready</span>
                 <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">
-                  {resolution} MP4
+                  {resolution} {formatLabel}
                 </span>
               </h3>
               <p className="text-xs text-slate-400">
-                {fallbackActive 
-                  ? 'Chrome Android download fallback: tap and hold video player' 
-                  : 'Captions permanently burned into video/mp4'}
+                {isAndroid || fallbackActive
+                  ? 'Chrome Android: Tap & hold video to Save to Gallery' 
+                  : 'Subtitles burned permanently into video'}
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
             title="Close"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Video Player Preview (Direct Play & Long-Press Save Target) */}
-        <div className="p-4 overflow-y-auto space-y-4">
+        {/* Video Player Preview & Long-Press Save Target */}
+        <div className="p-4 overflow-y-auto space-y-3.5">
 
-          {/* Fallback Notice Banner if a.click() failed or mobile mode */}
-          {fallbackActive && (
-            <div className="flex items-start gap-3 p-3.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200">
-              <Smartphone className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-semibold text-xs text-amber-300">Long press video to Save to Gallery</span>
-                <p className="text-slate-300 text-[11px] mt-0.5 leading-relaxed">
-                  Automatic download was blocked by Chrome Android. <strong className="text-white font-bold">Long press (tap and hold)</strong> the video player below and choose <strong className="text-amber-300 font-bold">"Download video"</strong> to save directly to your phone's Gallery.
-                </p>
-              </div>
+          {/* Primary Mobile Long-Press Instruction Banner */}
+          <div className="flex items-start gap-3 p-3.5 rounded-xl bg-gradient-to-r from-amber-500/20 to-orange-500/15 border border-amber-500/35 text-amber-200 shadow-sm">
+            <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-300 shrink-0 mt-0.5">
+              <Smartphone className="w-4 h-4" />
             </div>
-          )}
+            <div className="flex-1">
+              <div className="flex items-center justify-between gap-1 flex-wrap">
+                <span className="font-bold text-xs text-amber-300">
+                  Tap & Hold (Long Press) Video → Save Video to Gallery
+                </span>
+              </div>
+              <p className="text-slate-300 text-[11px] mt-1 leading-relaxed">
+                Android Chrome download protection prevents automatic file saving. To save directly to your phone's Photos or Gallery without errors: <strong className="text-white font-semibold">press and hold the video player below</strong>, then tap <strong className="text-amber-300 font-semibold">"Download video"</strong>.
+              </p>
+            </div>
+          </div>
 
           {/* HTML5 Video Element for direct preview & long-press saving */}
-          <div className="relative rounded-xl overflow-hidden bg-black border-2 border-slate-800 flex items-center justify-center max-h-[42vh] shadow-inner group">
+          <div className="relative rounded-xl overflow-hidden bg-black border-2 border-slate-700/70 flex items-center justify-center max-h-[42vh] shadow-inner group">
             <video
               key={videoUrl}
               src={videoUrl}
@@ -167,49 +170,59 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
             />
           </div>
 
-          {/* Mobile Helper Callout */}
-          {!fallbackActive && (
-            <div className="flex items-start gap-2.5 p-3 rounded-xl bg-blue-950/40 border border-blue-800/40 text-xs text-blue-200">
-              <Smartphone className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-semibold text-blue-300">Direct Mobile Gallery / Downloads:</span>
-                <p className="text-slate-300 text-[11px] mt-0.5">
-                  Tap <strong className="text-white">"Save Video to Phone"</strong> below. You can also tap and hold (long-press) the video above anytime to save directly to your camera roll.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* Action Buttons */}
+          {/* Quick Direct Actions */}
           <div className="space-y-2.5 pt-1">
+            
+            {/* 1. Open Video in New Tab (Direct Save Link) */}
+            {videoUrl && (
+              <a
+                href={videoUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-750 active:scale-[0.99] text-slate-200 hover:text-white font-medium text-xs border border-slate-700 flex items-center justify-between transition-all"
+              >
+                <div className="flex items-center gap-2">
+                  <ExternalLink className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <span className="font-semibold text-slate-100">Open Video in New Tab</span>
+                </div>
+                <span className="text-[10px] text-slate-400">Full screen player with 3-dot download menu →</span>
+              </a>
+            )}
+
+            {/* 2. Web Share API (Android native share sheet to save directly to Gallery / Files) */}
+            {canShare && (
+              <button
+                type="button"
+                onClick={handleNativeShare}
+                className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.99] text-white font-semibold text-xs sm:text-sm shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 transition-all cursor-pointer"
+              >
+                <Share2 className="w-4 h-4" />
+                <span>{shareStatus || 'Share to Gallery, WhatsApp & Files (Android Share)'}</span>
+              </button>
+            )}
+
+            {/* 3. Direct Browser Download (Desktop / Non-Android fallback) */}
             <button
+              type="button"
               onClick={handleDownloadAgain}
-              className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 active:scale-[0.99] text-white font-semibold text-sm shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2 transition-all cursor-pointer"
+              className="w-full py-2.5 px-4 rounded-xl bg-blue-600/90 hover:bg-blue-600 active:scale-[0.99] text-white font-medium text-xs border border-blue-500/40 flex items-center justify-center gap-2 transition-all cursor-pointer"
             >
               {downloaded ? (
                 <>
                   <CheckCircle2 className="w-4 h-4 text-green-300" />
-                  <span>Download Started! Writing to Disk & Gallery...</span>
+                  <span>Download Triggered!</span>
                 </>
               ) : (
                 <>
-                  <Download className="w-4 h-4" />
-                  <span>Save Video to Phone / Gallery ({resolution.toUpperCase()} MP4)</span>
+                  <Download className="w-4 h-4 text-blue-200" />
+                  <span>Direct Download Video File ({resolution.toUpperCase()} {formatLabel})</span>
                 </>
               )}
             </button>
 
-            {canShare && (
-              <button
-                onClick={handleNativeShare}
-                className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700/80 active:scale-[0.99] text-slate-200 hover:text-white font-medium text-xs border border-slate-700 flex items-center justify-center gap-2 transition-all cursor-pointer"
-              >
-                <Share2 className="w-4 h-4 text-blue-400" />
-                <span>{shareStatus || 'Share to Instagram, WhatsApp & Photos'}</span>
-              </button>
-            )}
-
+            {/* 4. Matching SRT subtitles */}
             <button
+              type="button"
               onClick={onDownloadSrt}
               className="w-full py-2 px-3 rounded-xl bg-slate-800/60 hover:bg-slate-800 text-slate-300 hover:text-white font-medium text-xs border border-slate-700/60 flex items-center justify-center gap-2 transition-all cursor-pointer"
             >
@@ -220,14 +233,15 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-slate-800 bg-slate-900/60 flex items-center justify-between text-[11px] text-slate-400">
+        <div className="px-5 py-3 border-t border-slate-800 bg-slate-900/80 flex items-center justify-between text-[11px] text-slate-400 shrink-0">
           <span className="flex items-center gap-1.5 text-slate-400">
-            <ShieldCheck className="w-3.5 h-3.5 text-green-400" />
-            Zero-storage client side MP4
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            Zero-storage client side rendering
           </span>
           <button
+            type="button"
             onClick={onClose}
-            className="text-xs font-semibold text-slate-300 hover:text-white transition-colors"
+            className="text-xs font-semibold text-slate-300 hover:text-white transition-colors cursor-pointer"
           >
             Done
           </button>

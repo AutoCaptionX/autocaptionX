@@ -179,14 +179,15 @@ export async function renderCaptionedVideo(
       const synchronizedWords = sanitizeAndEnforceMonotonic(words, totalDurationMs);
       const phrases = buildContinuousCaptionPhrases(synchronizedWords, totalDurationMs);
 
-      // 4. Setup MediaRecorder with best supported lightweight mobile mimeType
+      // 4. Setup MediaRecorder with best supported lightweight mobile mimeType (video/mp4 or video/webm;codecs=vp9,opus)
       const mimeTypes = [
         'video/mp4',
         'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
         'video/mp4;codecs=avc1,mp4a.40.2',
-        'video/webm;codecs=vp8,opus',
-        'video/webm;codecs=vp8',
         'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm;codecs=vp9',
+        'video/webm;codecs=vp8',
         'video/webm',
       ];
       let selectedMimeType = '';
@@ -231,9 +232,13 @@ export async function renderCaptionedVideo(
       };
 
       recorder.onstop = () => {
-        // Convert the processed canvas video explicitly to video/mp4 format before triggering download
+        const actualMime = selectedMimeType || recorder.mimeType || 'video/webm;codecs=vp9,opus';
+        const isMp4 = actualMime.toLowerCase().includes('mp4');
+        const containerType = isMp4 ? 'video/mp4' : 'video/webm;codecs=vp9,opus';
+
+        // Preserve legitimate container MIME type to prevent Android Chrome media scanner parser errors
         const finalBlob = new Blob(recordedChunks, {
-          type: 'video/mp4',
+          type: containerType,
         });
         // Immediately free intermediate chunk references from memory on long videos
         recordedChunks.length = 0;
@@ -296,21 +301,23 @@ export async function renderCaptionedVideo(
         return false;
       };
 
-      // Throttled animation loop synchronized to video frame rate
-      const drawFrame = (timestamp: number) => {
+      // Constant FPS rendering loop locked directly to video.currentTime
+      let lastRecordedVideoTime = -1;
+      const drawFrame = () => {
         if (isCompleted) return;
 
-        const elapsed = timestamp - lastDrawTimestamp;
-        if (elapsed >= frameIntervalMs) {
-          lastDrawTimestamp = timestamp - (elapsed % frameIntervalMs);
-          if (!isDrawing) {
-            isDrawing = true;
-            try {
+        if (!isDrawing) {
+          isDrawing = true;
+          try {
+            const vTime = video.currentTime;
+            // Record frame directly matching video player progression
+            if (vTime !== lastRecordedVideoTime || !video.paused) {
+              lastRecordedVideoTime = vTime;
               const reachedEnd = renderCurrentFrame();
               if (reachedEnd) return;
-            } finally {
-              isDrawing = false;
             }
+          } finally {
+            isDrawing = false;
           }
         }
 

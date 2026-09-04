@@ -1,8 +1,9 @@
 import type { CaptionWord, CaptionPreset } from '../types';
+import { getActiveWordIndexForPhrase } from './captionConverters';
 
 export interface RenderSubtitleParams {
   ctx: CanvasRenderingContext2D;
-  phrase: { words: CaptionWord[]; start: number; end: number };
+  phrase: { words: CaptionWord[]; start: number; end: number; id?: number };
   curMs: number;
   preset: CaptionPreset;
   width: number;
@@ -12,6 +13,57 @@ export interface RenderSubtitleParams {
 // Reusable off-screen text canvas to avoid repeated memory allocations
 let offscreenCanvas: HTMLCanvasElement | null = null;
 let offscreenCtx: CanvasRenderingContext2D | null = null;
+
+// Reusable scratch canvas dedicated exclusively to one-time pre-layout measurements
+let scratchMeasureCanvas: HTMLCanvasElement | null = null;
+let scratchMeasureCtx: CanvasRenderingContext2D | null = null;
+
+function getMeasureCtx(): CanvasRenderingContext2D | null {
+  if (!scratchMeasureCanvas) {
+    scratchMeasureCanvas = document.createElement('canvas');
+    scratchMeasureCtx = scratchMeasureCanvas.getContext('2d', { alpha: false });
+  }
+  return scratchMeasureCtx;
+}
+
+export interface PrecomputedWord {
+  text: string;
+  idx: number;
+  wordCenterX: number;
+  wordX: number;
+  textWidth: number;
+  baseFontSize: number;
+  activeFontSize: number;
+  badgeRect: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    r: number;
+  };
+  lineIndex: number;
+  lineY: number;
+}
+
+export interface PrecomputedPhraseLayout {
+  cacheKey: string;
+  pillWidth: number;
+  pillHeight: number;
+  pillX: number;
+  pillY: number;
+  borderRadius: number;
+  fontFamily: string;
+  baseFontSize: number;
+  activeFontSize: number;
+  words: PrecomputedWord[];
+  lines: Array<{
+    lineY: number;
+    words: PrecomputedWord[];
+  }>;
+}
+
+// Phrase layout cache to eliminate font measurement and reflow during live playback
+const phraseLayoutCache = new Map<string, PrecomputedPhraseLayout>();
 
 // Cache state to eliminate redundant text layout and rasterization on identical frames
 let lastCacheKey = '';
@@ -35,6 +87,13 @@ export function disposeSubtitleRenderer(): void {
     offscreenCanvas = null;
     offscreenCtx = null;
   }
+  if (scratchMeasureCanvas) {
+    scratchMeasureCanvas.width = 0;
+    scratchMeasureCanvas.height = 0;
+    scratchMeasureCanvas = null;
+    scratchMeasureCtx = null;
+  }
+  phraseLayoutCache.clear();
   lastCacheKey = '';
   cachedPillX = 0;
   cachedPillY = 0;
@@ -43,11 +102,196 @@ export function disposeSubtitleRenderer(): void {
 }
 
 /**
- * High-performance, memory-optimized canvas subtitle renderer:
- * 1. Uses a reusable off-screen canvas with explicit clearRect to prevent memory bloat.
- * 2. Caches rendered subtitle bitmaps across frames so 95% of frames only execute a fast drawImage.
- * 3. Replaces heavy multi-pass shadowBlur with optimized stroke and pill backdrops.
- * 4. Ensures strict audio-waveform word highlighting with zero latency.
+ * Computes and caches pre-calculated dynamic bounding boxes for words in a phrase:
+ * - Eliminates font measurement (measureText) from the live playback loop.
+ * - Pre-computes line wrapping, word coordinates, and highlight badge bounding boxes.
+ */
+function getPrecomputedPhraseLayout(
+  phrase: { words: CaptionWord[]; start: number; end: number; id?: number },
+  preset: CaptionPreset,
+  width: number,
+  height: number
+): PrecomputedPhraseLayout | null {
+  const wordsSignature = phrase.words.map((w) => w.text).join('|');
+  const phraseId = phrase.id !== undefined ? phrase.id : `${phrase.start}_${phrase.end}`;
+  const layoutKey = `${phraseId}_${preset}_${width}_${height}_${wordsSignature}`;
+
+  const cached = phraseLayoutCache.get(layoutKey);
+  if (cached) {
+    return cached;
+  }
+
+  const mCtx = getMeasureCtx();
+  if (!mCtx) return null;
+
+  const isVertical = height > width;
+  const totalChars = phrase.words.reduce((sum, item) => sum + (item.text || '').length, 0);
+  let charScale = 1;
+  if (totalChars > 32) {
+    charScale = 0.78;
+  } else if (totalChars > 22) {
+    charScale = 0.88;
+  } else if (totalChars > 16) {
+    charScale = 0.95;
+  }
+
+  const baseFontSize = isVertical
+    ? Math.max(16, Math.min(36, Math.round(width * 0.052 * charScale)))
+    : Math.max(18, Math.min(40, Math.round(height * 0.060 * charScale)));
+
+  const posY = Math.round(height * 0.78);
+
+  const fontFamily =
+    preset === 'hormozi'
+      ? '"Montserrat", "Impact", Arial, sans-serif'
+      : preset === 'beast'
+      ? '"Poppins", "Arial Black", sans-serif'
+      : '"Plus Jakarta Sans", sans-serif';
+
+  const spacing = Math.max(20, isVertical ? Math.round(width * 0.024) : Math.round(width * 0.018));
+  const activeScale = 1.15;
+  const activeFontSize = Math.round(baseFontSize * activeScale);
+
+  // Measure word dimensions with active font to reserve maximum stable width
+  mCtx.font = `900 ${activeFontSize}px ${fontFamily}`;
+
+  interface IntermediateWord {
+    text: string;
+    textWidth: number;
+    maxWordWidth: number;
+    baseFontSize: number;
+    activeFontSize: number;
+    idx: number;
+  }
+
+  const measuredWords: IntermediateWord[] = phrase.words.map((w, idx) => {
+    const text = w.text || '';
+    mCtx.font = `900 ${baseFontSize}px ${fontFamily}`;
+    const textWidth = Math.ceil(mCtx.measureText(text).width);
+
+    mCtx.font = `900 ${activeFontSize}px ${fontFamily}`;
+    const maxWordWidth = Math.ceil(mCtx.measureText(text).width);
+
+    return { text, textWidth, maxWordWidth, baseFontSize, activeFontSize, idx };
+  });
+
+  const maxLineWidth = Math.max(140, Math.min(width * (isVertical ? 0.82 : 0.76), width - 64));
+
+  // Split words into lines with stable wrapping
+  const lineGroups: IntermediateWord[][] = [];
+  let curGroup: IntermediateWord[] = [];
+  let curLineWidth = 0;
+
+  for (const item of measuredWords) {
+    const itemSpacing = curGroup.length > 0 ? spacing : 0;
+    const itemTotal = item.maxWordWidth + itemSpacing;
+
+    if (curGroup.length > 0 && curLineWidth + itemTotal > maxLineWidth) {
+      lineGroups.push(curGroup);
+      curGroup = [item];
+      curLineWidth = item.maxWordWidth;
+    } else {
+      curGroup.push(item);
+      curLineWidth += itemTotal;
+    }
+  }
+  if (curGroup.length > 0) {
+    lineGroups.push(curGroup);
+  }
+
+  const lineHeight = Math.round(baseFontSize * 1.54);
+  const totalContentHeight = lineGroups.length * lineHeight;
+  const maxLineW = Math.max(
+    0,
+    ...lineGroups.map((l) => l.reduce((s, w) => s + w.maxWordWidth, 0) + Math.max(0, l.length - 1) * spacing)
+  );
+
+  const paddingX = Math.max(28, Math.round(baseFontSize * 1.10));
+  const paddingY = Math.max(16, Math.round(baseFontSize * 0.65));
+  const pillWidth = Math.min(width - 24, Math.max(maxLineW + paddingX * 2, 160));
+  const pillHeight = Math.round(totalContentHeight + paddingY * 2);
+  const pillX = Math.round((width - pillWidth) / 2);
+  const pillY = Math.round(posY - pillHeight / 2);
+  const borderRadius = Math.round(baseFontSize * 0.38);
+
+  // Pre-calculate exact coordinates and dynamic bounding box badges for every word
+  let startLineY = paddingY + lineHeight / 2;
+  const precomputedWords: PrecomputedWord[] = [];
+  const lines: Array<{ lineY: number; words: PrecomputedWord[] }> = [];
+
+  lineGroups.forEach((group, lineIdx) => {
+    const lineWidth = group.reduce((s, w) => s + w.textWidth, 0) + Math.max(0, group.length - 1) * spacing;
+    let curX = Math.round((pillWidth - lineWidth) / 2);
+    const lineWords: PrecomputedWord[] = [];
+
+    group.forEach((w) => {
+      const wordCenterX = Math.round(curX + w.textWidth / 2);
+      const badgePaddingX = 12; // 12px each side = 24px total badge padding
+      const hlW = Math.round(w.textWidth + 24);
+      const hlH = Math.round(w.activeFontSize * 1.32);
+      const hlX = Math.round(curX - badgePaddingX);
+      const hlY = Math.round(startLineY - hlH / 2);
+      const hlR = Math.max(6, Math.round(w.activeFontSize * 0.22));
+
+      const pw: PrecomputedWord = {
+        text: w.text,
+        idx: w.idx,
+        wordCenterX,
+        wordX: curX,
+        textWidth: w.textWidth,
+        baseFontSize: w.baseFontSize,
+        activeFontSize: w.activeFontSize,
+        badgeRect: {
+          x: hlX,
+          y: hlY,
+          w: hlW,
+          h: hlH,
+          r: hlR,
+        },
+        lineIndex: lineIdx,
+        lineY: startLineY,
+      };
+
+      precomputedWords.push(pw);
+      lineWords.push(pw);
+      curX += w.textWidth + spacing;
+    });
+
+    lines.push({ lineY: startLineY, words: lineWords });
+    startLineY += lineHeight;
+  });
+
+  const layout: PrecomputedPhraseLayout = {
+    cacheKey: layoutKey,
+    pillWidth,
+    pillHeight,
+    pillX,
+    pillY,
+    borderRadius,
+    fontFamily,
+    baseFontSize,
+    activeFontSize,
+    words: precomputedWords,
+    lines,
+  };
+
+  // Keep cache size bounded (max 60 phrases)
+  if (phraseLayoutCache.size > 60) {
+    const firstKey = phraseLayoutCache.keys().next().value;
+    if (firstKey) phraseLayoutCache.delete(firstKey);
+  }
+  phraseLayoutCache.set(layoutKey, layout);
+
+  return layout;
+}
+
+/**
+ * High-performance, zero-latency canvas subtitle renderer:
+ * 1. Uses pre-calculated dynamic bounding boxes for words so the canvas never re-measures
+ *    font size, padding, or lines during live playback.
+ * 2. Uses strict audio-visual timestamp interpolation to snap the active word highlighting
+ *    precisely to video.currentTime without queuing lag.
+ * 3. Off-screen canvas bitmap caching allows 95% of frames to execute a simple GPU blit.
  */
 export function renderSubtitlesOnCanvas({
   ctx,
@@ -61,28 +305,14 @@ export function renderSubtitlesOnCanvas({
     return;
   }
 
-  // 1. Determine active word index matching audio waveform precisely
-  let activeWordIdx = -1;
-  for (let i = 0; i < phrase.words.length; i++) {
-    const w = phrase.words[i];
-    const nextW = phrase.words[i + 1];
-
-    if (curMs >= w.start && curMs <= w.end) {
-      activeWordIdx = i;
-      break;
-    }
-
-    // Micro-pause cadence between words within phrase (< 250ms)
-    if (nextW && curMs > w.end && curMs < nextW.start && (nextW.start - w.end) <= 250) {
-      activeWordIdx = i;
-      break;
-    }
-  }
+  // 1. Strict Audio-Visual Timestamp Interpolation with Zero Queuing Lag
+  const activeWordIdx = getActiveWordIndexForPhrase(phrase.words, curMs, phrase.start, phrase.end);
 
   // Generate cache key based on phrase content, active word, preset, and dimensions
-  const cacheKey = `${phrase.start}_${phrase.end}_${activeWordIdx}_${preset}_${width}_${height}`;
+  const phraseId = phrase.id !== undefined ? phrase.id : `${phrase.start}_${phrase.end}`;
+  const cacheKey = `${phraseId}_${activeWordIdx}_${preset}_${width}_${height}`;
 
-  // If off-screen canvas has the exact frame already rendered, blit it directly (zero layout/raster cost)
+  // If off-screen canvas already has the exact frame rendered, blit it directly (zero layout/raster cost)
   if (cacheKey === lastCacheKey && offscreenCanvas && cachedPillW > 0 && cachedPillH > 0) {
     ctx.drawImage(
       offscreenCanvas,
@@ -98,6 +328,10 @@ export function renderSubtitlesOnCanvas({
     return;
   }
 
+  // 2. Retrieve Pre-Calculated Dynamic Bounding Box Layout (zero measureText during playback)
+  const layout = getPrecomputedPhraseLayout(phrase, preset, width, height);
+  if (!layout) return;
+
   // Initialize or resize reusable offscreen canvas
   if (!offscreenCanvas) {
     offscreenCanvas = document.createElement('canvas');
@@ -108,206 +342,115 @@ export function renderSubtitlesOnCanvas({
     return;
   }
 
-  // Scale parameters
-  const isVertical = height > width;
-  const totalChars = phrase.words.reduce((sum, item) => sum + (item.text || '').length, 0);
-  let charScale = 1;
-  if (totalChars > 32) {
-    charScale = 0.78;
-  } else if (totalChars > 22) {
-    charScale = 0.88;
-  } else if (totalChars > 16) {
-    charScale = 0.95;
-  }
-
-  const baseFontSize = isVertical
-    ? Math.max(16, Math.min(36, Math.round(width * 0.052 * charScale)))
-    : Math.max(18, Math.min(40, Math.round(height * 0.060 * charScale)));
-  // Lower-third (positioned at 78% from top, sitting cleanly above HTML5 video native controls)
-  const posY = Math.round(height * 0.78);
-
-  const fontFamily =
-    preset === 'hormozi'
-      ? '"Montserrat", "Impact", Arial, sans-serif'
-      : preset === 'beast'
-      ? '"Poppins", "Arial Black", sans-serif'
-      : '"Plus Jakarta Sans", sans-serif';
-
-  const spacing = Math.max(20, isVertical ? Math.round(width * 0.024) : Math.round(width * 0.018));
-  const activeScale = 1.15;
-  const activeFontSize = Math.round(baseFontSize * activeScale);
-
-  // Measure all words with both base and active fonts to ensure layout stability
-  // Using reserved active word widths prevents layout shifts/jitter as speaker progresses
-  offscreenCtx.font = `900 ${activeFontSize}px ${fontFamily}`;
-  const wordMetrics = phrase.words.map((w, idx) => {
-    const text = w.text || '';
-    const isCurrent = activeWordIdx !== -1 && idx === activeWordIdx;
-    const fontSize = isCurrent ? activeFontSize : baseFontSize;
-    offscreenCtx!.font = `900 ${fontSize}px ${fontFamily}`;
-    const textWidth = Math.ceil(offscreenCtx!.measureText(text).width);
-
-    offscreenCtx!.font = `900 ${activeFontSize}px ${fontFamily}`;
-    const maxWordWidth = Math.ceil(offscreenCtx!.measureText(text).width);
-
-    return { text, textWidth, maxWordWidth, fontSize, isCurrent, idx };
-  });
-
-  // Calculate maximum line width allowed to fit comfortably within video canvas
-  // Keep enough margin from canvas edges so captions never clip
-  const maxLineWidth = Math.max(140, Math.min(width * (isVertical ? 0.82 : 0.76), width - 64));
-
-  // Split words into lines using stable maximum word widths to guarantee wrap consistency
-  const lines: Array<typeof wordMetrics> = [];
-  let currentLine: typeof wordMetrics = [];
-  let currentLineWidth = 0;
-
-  for (const item of wordMetrics) {
-    const itemSpacing = currentLine.length > 0 ? spacing : 0;
-    const itemTotal = item.maxWordWidth + itemSpacing;
-
-    if (currentLine.length > 0 && currentLineWidth + itemTotal > maxLineWidth) {
-      lines.push(currentLine);
-      currentLine = [item];
-      currentLineWidth = item.maxWordWidth;
-    } else {
-      currentLine.push(item);
-      currentLineWidth += itemTotal;
-    }
-  }
-  if (currentLine.length > 0) {
-    lines.push(currentLine);
-  }
-
-  // Calculate pill dimensions with guaranteed margins for yellow badge and stroke
-  const lineHeight = Math.round(baseFontSize * 1.54);
-  const totalContentHeight = lines.length * lineHeight;
-  const maxLineW = Math.max(
-    0,
-    ...lines.map((l) => l.reduce((s, w) => s + w.maxWordWidth, 0) + Math.max(0, l.length - 1) * spacing)
-  );
-
-  // Generous horizontal and vertical padding to completely eliminate yellow badge clipping
-  // 24px badge padding requires at least 28px padding to ensure border clearance
-  const paddingX = Math.max(28, Math.round(baseFontSize * 1.10));
-  const paddingY = Math.max(16, Math.round(baseFontSize * 0.65));
-  const pillWidth = Math.min(width - 24, Math.max(maxLineW + paddingX * 2, 160));
-  const pillHeight = Math.round(totalContentHeight + paddingY * 2);
-  const pillX = Math.round((width - pillWidth) / 2);
-  const pillY = Math.round(posY - pillHeight / 2);
-  const borderRadius = Math.round(baseFontSize * 0.38);
+  const { pillWidth, pillHeight, pillX, pillY, borderRadius, fontFamily } = layout;
 
   // Resize offscreen canvas to exact pill bounds if needed
   if (offscreenCanvas.width !== pillWidth || offscreenCanvas.height !== pillHeight) {
     offscreenCanvas.width = pillWidth;
     offscreenCanvas.height = pillHeight;
   } else {
-    // Clear off-screen text canvas completely to eliminate GPU texture leaks and ghosting
+    // Clear off-screen text canvas completely
     offscreenCtx.clearRect(0, 0, pillWidth, pillHeight);
   }
 
-  // 2. Draw Pill Background on Off-Screen Canvas (Relative coordinates: 0, 0 to pillWidth, pillHeight)
+  // 3. Draw Pill Background on Off-Screen Canvas
   offscreenCtx.save();
   offscreenCtx.beginPath();
   offscreenCtx.roundRect(0, 0, pillWidth, pillHeight, borderRadius);
   offscreenCtx.fillStyle = 'rgba(0, 0, 0, 0.88)';
   offscreenCtx.fill();
-  offscreenCtx.lineWidth = Math.max(1.5, Math.round(baseFontSize * 0.04));
+  offscreenCtx.lineWidth = Math.max(1.5, Math.round(layout.baseFontSize * 0.04));
   offscreenCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
   offscreenCtx.stroke();
 
-  // 3. Render Lines and Words with Memory-Safe Font/Shadow Optimization
-  let startLineY = paddingY + lineHeight / 2;
+  // 4. Render Active Word Highlight Badge (Pre-Calculated Bounding Box)
+  if (activeWordIdx >= 0 && activeWordIdx < layout.words.length) {
+    const activeW = layout.words[activeWordIdx];
+    const { x, y, w, h, r } = activeW.badgeRect;
 
-  lines.forEach((lineWords) => {
-    const lineWidth = lineWords.reduce((s, w) => s + w.textWidth, 0) + Math.max(0, lineWords.length - 1) * spacing;
-    let curX = Math.round((pillWidth - lineWidth) / 2);
+    offscreenCtx.beginPath();
+    offscreenCtx.roundRect(x, y, w, h, r);
 
-    lineWords.forEach((w) => {
-      const wordCenterX = Math.round(curX + w.textWidth / 2);
-      offscreenCtx!.font = `900 ${w.fontSize}px ${fontFamily}`;
-      offscreenCtx!.textAlign = 'center';
-      offscreenCtx!.textBaseline = 'middle';
-      offscreenCtx!.lineJoin = 'round';
+    if (preset === 'hormozi') {
+      offscreenCtx.fillStyle = 'rgba(234, 179, 8, 0.42)';
+      offscreenCtx.fill();
+    } else if (preset === 'neon') {
+      offscreenCtx.fillStyle = 'rgba(34, 211, 238, 0.28)';
+      offscreenCtx.fill();
+    } else if (preset === 'beast') {
+      offscreenCtx.fillStyle = 'rgba(74, 222, 128, 0.32)';
+      offscreenCtx.fill();
+    }
+  }
 
-      if (preset === 'hormozi') {
-        if (w.isCurrent) {
-          // Highlight background badge with textWidth + 24px padding
-          const badgePaddingX = 12; // 12px each side = 24px total padding
-          const hlW = Math.round(w.textWidth + 24);
-          const hlH = Math.round(w.fontSize * 1.32);
-          const hlX = Math.round(curX - badgePaddingX);
-          const hlY = Math.round(startLineY - hlH / 2);
+  // 5. Render Words using Pre-Calculated Center Coordinates & Font Sizes (Zero Runtime Math)
+  offscreenCtx.textAlign = 'center';
+  offscreenCtx.textBaseline = 'middle';
+  offscreenCtx.lineJoin = 'round';
 
-          offscreenCtx!.beginPath();
-          offscreenCtx!.roundRect(hlX, hlY, hlW, hlH, Math.max(6, Math.round(w.fontSize * 0.22)));
-          offscreenCtx!.fillStyle = 'rgba(234, 179, 8, 0.42)';
-          offscreenCtx!.fill();
+  for (let i = 0; i < layout.words.length; i++) {
+    const w = layout.words[i];
+    const isCurrent = i === activeWordIdx;
+    const fontSize = isCurrent ? w.activeFontSize : w.baseFontSize;
 
-          // Active Word in Bright Yellow with optimized stroke
-          offscreenCtx!.fillStyle = '#fde047';
-          // Low-overhead subtle shadow
-          offscreenCtx!.shadowColor = 'rgba(234, 179, 8, 0.65)';
-          offscreenCtx!.shadowBlur = Math.min(6, Math.round(w.fontSize * 0.2));
-        } else {
-          offscreenCtx!.fillStyle = '#ffffff';
-          offscreenCtx!.shadowColor = 'transparent';
-          offscreenCtx!.shadowBlur = 0;
-        }
+    offscreenCtx.font = `900 ${fontSize}px ${fontFamily}`;
 
-        offscreenCtx!.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
-        offscreenCtx!.strokeStyle = '#000000';
-        offscreenCtx!.strokeText(w.text, wordCenterX, startLineY);
-        offscreenCtx!.fillText(w.text, wordCenterX, startLineY);
-
-      } else if (preset === 'neon') {
-        if (w.isCurrent) {
-          offscreenCtx!.fillStyle = '#67e8f9';
-          offscreenCtx!.shadowColor = 'rgba(34, 211, 238, 0.7)';
-          offscreenCtx!.shadowBlur = Math.min(8, Math.round(w.fontSize * 0.25));
-        } else {
-          offscreenCtx!.fillStyle = '#ffffff';
-          offscreenCtx!.shadowColor = 'transparent';
-          offscreenCtx!.shadowBlur = 0;
-        }
-
-        offscreenCtx!.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
-        offscreenCtx!.strokeStyle = '#000000';
-        offscreenCtx!.strokeText(w.text, wordCenterX, startLineY);
-        offscreenCtx!.fillText(w.text, wordCenterX, startLineY);
-
-      } else if (preset === 'beast') {
-        if (w.isCurrent) {
-          offscreenCtx!.fillStyle = '#4ade80';
-          offscreenCtx!.shadowColor = 'rgba(74, 222, 128, 0.65)';
-          offscreenCtx!.shadowBlur = Math.min(8, Math.round(w.fontSize * 0.2));
-        } else {
-          offscreenCtx!.fillStyle = '#ffffff';
-          offscreenCtx!.shadowColor = 'transparent';
-          offscreenCtx!.shadowBlur = 0;
-        }
-
-        offscreenCtx!.lineWidth = Math.max(2, Math.round(w.fontSize * 0.08));
-        offscreenCtx!.strokeStyle = '#000000';
-        offscreenCtx!.strokeText(w.text, wordCenterX, startLineY);
-        offscreenCtx!.fillText(w.text, wordCenterX, startLineY);
-
+    if (preset === 'hormozi') {
+      if (isCurrent) {
+        offscreenCtx.fillStyle = '#fde047';
+        offscreenCtx.shadowColor = 'rgba(234, 179, 8, 0.65)';
+        offscreenCtx.shadowBlur = Math.min(6, Math.round(fontSize * 0.2));
       } else {
-        // Clean preset
-        offscreenCtx!.fillStyle = '#ffffff';
-        offscreenCtx!.shadowColor = 'transparent';
-        offscreenCtx!.shadowBlur = 0;
-        offscreenCtx!.lineWidth = Math.max(1.5, Math.round(w.fontSize * 0.06));
-        offscreenCtx!.strokeStyle = '#000000';
-        offscreenCtx!.strokeText(w.text, wordCenterX, startLineY);
-        offscreenCtx!.fillText(w.text, wordCenterX, startLineY);
+        offscreenCtx.fillStyle = '#ffffff';
+        offscreenCtx.shadowColor = 'transparent';
+        offscreenCtx.shadowBlur = 0;
       }
+      offscreenCtx.lineWidth = Math.max(2, Math.round(fontSize * 0.08));
+      offscreenCtx.strokeStyle = '#000000';
+      offscreenCtx.strokeText(w.text, w.wordCenterX, w.lineY);
+      offscreenCtx.fillText(w.text, w.wordCenterX, w.lineY);
 
-      curX += w.textWidth + spacing;
-    });
+    } else if (preset === 'neon') {
+      if (isCurrent) {
+        offscreenCtx.fillStyle = '#67e8f9';
+        offscreenCtx.shadowColor = 'rgba(34, 211, 238, 0.7)';
+        offscreenCtx.shadowBlur = Math.min(8, Math.round(fontSize * 0.25));
+      } else {
+        offscreenCtx.fillStyle = '#ffffff';
+        offscreenCtx.shadowColor = 'transparent';
+        offscreenCtx.shadowBlur = 0;
+      }
+      offscreenCtx.lineWidth = Math.max(2, Math.round(fontSize * 0.08));
+      offscreenCtx.strokeStyle = '#000000';
+      offscreenCtx.strokeText(w.text, w.wordCenterX, w.lineY);
+      offscreenCtx.fillText(w.text, w.wordCenterX, w.lineY);
 
-    startLineY += lineHeight;
-  });
+    } else if (preset === 'beast') {
+      if (isCurrent) {
+        offscreenCtx.fillStyle = '#4ade80';
+        offscreenCtx.shadowColor = 'rgba(74, 222, 128, 0.65)';
+        offscreenCtx.shadowBlur = Math.min(8, Math.round(fontSize * 0.2));
+      } else {
+        offscreenCtx.fillStyle = '#ffffff';
+        offscreenCtx.shadowColor = 'transparent';
+        offscreenCtx.shadowBlur = 0;
+      }
+      offscreenCtx.lineWidth = Math.max(2, Math.round(fontSize * 0.08));
+      offscreenCtx.strokeStyle = '#000000';
+      offscreenCtx.strokeText(w.text, w.wordCenterX, w.lineY);
+      offscreenCtx.fillText(w.text, w.wordCenterX, w.lineY);
+
+    } else {
+      // Clean preset
+      offscreenCtx.fillStyle = '#ffffff';
+      offscreenCtx.shadowColor = 'transparent';
+      offscreenCtx.shadowBlur = 0;
+      offscreenCtx.lineWidth = Math.max(1.5, Math.round(fontSize * 0.06));
+      offscreenCtx.strokeStyle = '#000000';
+      offscreenCtx.strokeText(w.text, w.wordCenterX, w.lineY);
+      offscreenCtx.fillText(w.text, w.wordCenterX, w.lineY);
+    }
+  }
 
   offscreenCtx.restore();
 
@@ -318,7 +461,7 @@ export function renderSubtitlesOnCanvas({
   cachedPillW = pillWidth;
   cachedPillH = pillHeight;
 
-  // Blit pre-rendered offscreen canvas to main video canvas
+  // Blit pre-rendered offscreen canvas to main video canvas in a single draw operation
   ctx.drawImage(
     offscreenCanvas,
     0,

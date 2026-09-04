@@ -413,25 +413,27 @@ export default function App() {
         }
       );
 
-      // Convert the processed canvas video explicitly to video/mp4 format before triggering download
-      const mp4Blob = new Blob([renderedBlob], { type: 'video/mp4' });
+      // Determine container format (MP4 or WebM) from renderedBlob
+      const isWebm = renderedBlob.type.includes('webm');
+      const ext = isWebm ? '.webm' : '.mp4';
       const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
-      const fileName = `captioned_${baseName}_${selectedResolution}.mp4`;
+      const fileName = `captioned_${baseName}_${selectedResolution}${ext}`;
 
-      setExportedVideoBlob(mp4Blob);
+      setExportedVideoBlob(renderedBlob);
       setExportedFileName(fileName);
+      // Automatically open the clean Popup Modal with standard HTML5 controls
       setIsExportPreviewOpen(true);
 
-      const res = await downloadOrSaveVideoFile(mp4Blob, fileName, (notice) => {
+      const res = await downloadOrSaveVideoFile(renderedBlob, fileName, (notice) => {
         setExportStatusText(notice);
       });
 
       if (res.needsLongPressModal) {
         setIsExportFallbackMode(true);
-        showToast('Long press video to Save to Gallery');
+        showToast('Tap & hold video to Save to Gallery, or tap Share.');
       } else {
         setIsExportFallbackMode(false);
-        showToast(res.message || `Saved captioned video in ${selectedResolution.toUpperCase()} MP4!`);
+        showToast(res.message || `Saved captioned video in ${selectedResolution.toUpperCase()}!`);
       }
     } catch (exportErr: any) {
       console.warn('Canvas render notice, falling back to direct video stream preview modal:', exportErr);

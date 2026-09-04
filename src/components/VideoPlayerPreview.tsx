@@ -13,9 +13,15 @@ import {
   X,
   Smartphone,
   AlertCircle,
+  ExternalLink,
+  Share2,
 } from 'lucide-react';
 import type { CaptionWord, CaptionPreset } from '../types';
-import { buildContinuousCaptionPhrases, findActivePhraseIndex } from '../utils/captionConverters';
+import {
+  buildContinuousCaptionPhrases,
+  findActivePhraseIndex,
+  getActiveWordIndexForPhrase,
+} from '../utils/captionConverters';
 import { sanitizeAndEnforceMonotonic } from '../utils/audioExtractor';
 import { renderSubtitlesOnCanvas, disposeSubtitleRenderer } from '../utils/subtitleCanvasRenderer';
 import { downloadOrSaveVideoFile } from '../utils/fileDownloader';
@@ -128,7 +134,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     return buildContinuousCaptionPhrases(synchronizedWords, effectiveDurationMs);
   }, [synchronizedWords, effectiveDurationMs]);
 
-  // Word-level audio waveform synchronization
+  // Word-level audio waveform synchronization with Audio-Visual Timestamp Interpolation
   const syncSubtitleForTime = useCallback((curMs: number) => {
     if (!synchronizedWords || synchronizedWords.length === 0 || !phrases || phrases.length === 0) {
       if (lastActiveWordRef.current !== null) {
@@ -148,21 +154,13 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     phraseIdx = Math.max(0, Math.min(phrases.length - 1, phraseIdx !== -1 ? phraseIdx : 0));
     const currentPhrase = phrases[phraseIdx];
 
-    let wordIdxInPhrase = -1;
-    for (let j = 0; j < currentPhrase.words.length; j++) {
-      const pw = currentPhrase.words[j];
-      const nextPw = currentPhrase.words[j + 1];
-
-      if (curMs >= pw.start && curMs <= pw.end) {
-        wordIdxInPhrase = j;
-        break;
-      }
-
-      if (nextPw && curMs > pw.end && curMs < nextPw.start && (nextPw.start - pw.end) <= 250) {
-        wordIdxInPhrase = j;
-        break;
-      }
-    }
+    // Zero-lag active word selection matching video.currentTime precisely
+    const wordIdxInPhrase = getActiveWordIndexForPhrase(
+      currentPhrase.words,
+      curMs,
+      currentPhrase.start,
+      currentPhrase.end
+    );
 
     lastActiveWordRef.current = { phraseIndex: phraseIdx, wordIdx: wordIdxInPhrase };
   }, [synchronizedWords, phrases]);
@@ -174,7 +172,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 
   // Canvas subtitle frame rendering: clears transparent canvas and renders active caption
   // DOWNSCALED PREVIEW RENDER BUFFER: Capped to max 720p to eliminate CPU/RAM exhaustion and freezing on mobile
-  const drawPreviewFrame = useCallback(() => {
+  const drawPreviewFrame = useCallback((targetMs?: number) => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
@@ -214,7 +212,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 
     // Draw active animated subtitle over video
     if (words.length > 0 && phrases.length > 0) {
-      const curMs = Math.round(video.currentTime * 1000);
+      const curMs = typeof targetMs === 'number' ? targetMs : Math.round(video.currentTime * 1000);
       const pIdx = findActivePhraseIndex(phrases, curMs);
       if (pIdx !== -1) {
         renderSubtitlesOnCanvas({
@@ -248,7 +246,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         isVertical: vh >= vw,
       });
     }
-    requestAnimationFrame(drawPreviewFrame);
+    requestAnimationFrame(() => drawPreviewFrame());
   };
 
   // Synchronize external seek from parent (timeline editor)
@@ -259,54 +257,81 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
       setCurrentTimeSec(targetSec);
       syncSubtitleForTime(seekTimeMs);
       onTimeUpdateRef.current?.(seekTimeMs);
-      requestAnimationFrame(drawPreviewFrame);
+      requestAnimationFrame(() => drawPreviewFrame(seekTimeMs));
     }
   }, [seekTimeMs, syncSubtitleForTime, drawPreviewFrame]);
 
-  // LIGHTWEIGHT THROTTLED RENDERING MECHANISM:
-  // - No heavy continuous background loop when video is paused or ended.
-  // - Sync caption rendering strictly with video.currentTime.
-  // - Throttled to max 30 fps only while actively playing.
+  // CONSTANT FPS PLAYBACK SYNCHRONIZED DIRECTLY TO VIDEO CLOCK:
+  // - Uses video.currentTime directly as the master clock source (no setInterval, no wall-clock drift).
+  // - Hardware-synchronized with requestVideoFrameCallback when supported, with continuous requestAnimationFrame fallback.
+  // - Locks caption rendering strictly to media playback progression, eliminating mid-video speed mismatch or slow-down.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     let animFrameId: number | null = null;
-    let lastDrawTimestamp = 0;
-    const targetFps = 30;
-    const frameIntervalMs = 1000 / targetFps; // ~33.33ms
+    let rvfcId: number | null = null;
+    let lastRenderedTimeSec = -1;
 
     const stopLoop = () => {
+      if (rvfcId !== null && 'cancelVideoFrameCallback' in video) {
+        try {
+          (video as any).cancelVideoFrameCallback(rvfcId);
+        } catch (e) {}
+        rvfcId = null;
+      }
       if (animFrameId !== null) {
         cancelAnimationFrame(animFrameId);
         animFrameId = null;
       }
     };
 
-    // Lightweight loop that executes ONLY when video is actively playing
-    const renderLoop = (timestamp: number) => {
+    const renderFrameAtTime = (mediaTimeSec: number) => {
+      const curMs = Math.round(mediaTimeSec * 1000);
+      drawPreviewFrame(curMs);
+      setCurrentTimeSec(mediaTimeSec);
+      syncSubtitleForTimeRef.current(curMs);
+
+      const now = performance.now();
+      if (now - lastParentUpdateTimeRef.current > 150) {
+        lastParentUpdateTimeRef.current = now;
+        onTimeUpdateRef.current?.(curMs);
+      }
+    };
+
+    // Hardware-synchronized video frame presentation callback
+    const onVideoFrame = (_now: DOMHighResTimeStamp, metadata?: any) => {
       if (!video || video.paused || video.ended) {
         stopLoop();
-        return; // STOP! Never loop in background when paused or ended
+        return;
       }
 
-      const elapsed = timestamp - lastDrawTimestamp;
-      if (elapsed >= frameIntervalMs) {
-        lastDrawTimestamp = timestamp - (elapsed % frameIntervalMs);
-        drawPreviewFrame();
+      const mediaTimeSec =
+        metadata && typeof metadata.mediaTime === 'number' ? metadata.mediaTime : video.currentTime;
+      lastRenderedTimeSec = mediaTimeSec;
+      renderFrameAtTime(mediaTimeSec);
 
-        const curMs = Math.round(video.currentTime * 1000);
-        setCurrentTimeSec(video.currentTime);
-        syncSubtitleForTimeRef.current(curMs);
+      if (!video.paused && !video.ended && 'requestVideoFrameCallback' in video) {
+        rvfcId = (video as any).requestVideoFrameCallback(onVideoFrame);
+      } else {
+        stopLoop();
+      }
+    };
 
-        const now = performance.now();
-        if (now - lastParentUpdateTimeRef.current > 150) {
-          lastParentUpdateTimeRef.current = now;
-          onTimeUpdateRef.current?.(curMs);
-        }
+    // Constant FPS animation loop driven directly by video.currentTime
+    const renderLoop = () => {
+      if (!video || video.paused || video.ended) {
+        stopLoop();
+        return;
       }
 
-      // Schedule next frame ONLY if video is still actively playing
+      const currentSec = video.currentTime;
+      // Redraw whenever video time advances or actively playing
+      if (currentSec !== lastRenderedTimeSec || !video.paused) {
+        lastRenderedTimeSec = currentSec;
+        renderFrameAtTime(currentSec);
+      }
+
       if (!video.paused && !video.ended) {
         animFrameId = requestAnimationFrame(renderLoop);
       } else {
@@ -316,33 +341,29 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
 
     const handlePlay = () => {
       stopLoop();
-      animFrameId = requestAnimationFrame(renderLoop);
+      lastRenderedTimeSec = -1;
+      if ('requestVideoFrameCallback' in video) {
+        rvfcId = (video as any).requestVideoFrameCallback(onVideoFrame);
+      } else {
+        animFrameId = requestAnimationFrame(renderLoop);
+      }
     };
 
     const handlePauseOrEnded = () => {
       stopLoop();
-      drawPreviewFrame();
-      const curMs = Math.round(video.currentTime * 1000);
-      setCurrentTimeSec(video.currentTime);
-      syncSubtitleForTimeRef.current(curMs);
-      onTimeUpdateRef.current?.(curMs);
+      renderFrameAtTime(video.currentTime);
+      onTimeUpdateRef.current?.(Math.round(video.currentTime * 1000));
     };
 
     const handleTimeUpdate = () => {
       if (video.paused) {
-        drawPreviewFrame();
-        const curMs = Math.round(video.currentTime * 1000);
-        setCurrentTimeSec(video.currentTime);
-        syncSubtitleForTimeRef.current(curMs);
+        renderFrameAtTime(video.currentTime);
       }
     };
 
     const handleSeeked = () => {
-      drawPreviewFrame();
-      const curMs = Math.round(video.currentTime * 1000);
-      setCurrentTimeSec(video.currentTime);
-      syncSubtitleForTimeRef.current(curMs);
-      onTimeUpdateRef.current?.(curMs);
+      renderFrameAtTime(video.currentTime);
+      onTimeUpdateRef.current?.(Math.round(video.currentTime * 1000));
     };
 
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
@@ -357,7 +378,7 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
     video.addEventListener('timeupdate', handleTimeUpdate);
 
     // Initial paint of single frame
-    drawPreviewFrame();
+    drawPreviewFrame(Math.round(video.currentTime * 1000));
 
     return () => {
       stopLoop();
@@ -563,8 +584,8 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
         {!videoUrl ? (
           <div className="text-center p-8 flex flex-col items-center justify-center">
             <Film className="w-12 h-12 text-slate-700 mb-3" />
-            <p className="text-sm text-slate-400 font-semibold mb-1">No Video Loaded</p>
-            <p className="text-xs text-slate-600">Upload a video to preview subtitles with HTML5 native controls.</p>
+            <p className="text-sm text-slate-400 font-semibold mb-1">Auto Captions Generated Video Preview</p>
+            <p className="text-xs text-slate-600">Upload a video to preview auto-generated captions live with subtitles.</p>
           </div>
         ) : (
           <div className="w-full h-full relative flex items-center justify-center bg-black overflow-hidden group">
@@ -716,24 +737,52 @@ export const VideoPlayerPreview: React.FC<VideoPlayerPreviewProps> = ({
                 />
               </div>
 
-              {/* Action button to retry direct download */}
-              <button
-                type="button"
-                onClick={() => {
-                  if (fallbackVideoUrl) {
-                    const a = document.createElement('a');
-                    a.href = fallbackVideoUrl;
-                    a.download = 'AutoCaptionX_Video.mp4';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                  }
-                }}
-                className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center justify-center gap-2 transition cursor-pointer"
-              >
-                <Download className="w-4 h-4" />
-                <span>Try Direct Download Again</span>
-              </button>
+              {/* Action buttons */}
+              <div className="space-y-2 pt-1">
+                {/* 1. Open Video in New Tab */}
+                {fallbackVideoUrl && (
+                  <a
+                    href={fallbackVideoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full py-2.5 px-3.5 rounded-xl bg-slate-800 hover:bg-slate-750 text-slate-200 hover:text-white font-medium text-xs border border-slate-700 flex items-center justify-between transition cursor-pointer"
+                  >
+                    <div className="flex items-center gap-2">
+                      <ExternalLink className="w-4 h-4 text-cyan-400 shrink-0" />
+                      <span className="font-semibold text-white">Open Video in New Tab</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400">Direct full view & save →</span>
+                  </a>
+                )}
+
+                {/* 2. Web Share API for native gallery saving */}
+                {typeof navigator !== 'undefined' && Boolean(navigator.share) && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!fallbackVideoUrl) return;
+                      try {
+                        const response = await fetch(fallbackVideoUrl);
+                        const blob = await response.blob();
+                        const file = new File([blob], 'AutoCaptionX_Video.mp4', { type: 'video/mp4' });
+                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                          await navigator.share({
+                            files: [file],
+                            title: 'AutoCaptionX Video',
+                            text: 'Captioned video preview',
+                          });
+                        }
+                      } catch (err: any) {
+                        if (err.name !== 'AbortError') console.warn('Share error:', err);
+                      }
+                    }}
+                    className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-md shadow-emerald-600/20"
+                  >
+                    <Share2 className="w-4 h-4" />
+                    <span>Save / Share to Gallery & Files</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="px-4 py-2.5 border-t border-slate-800 bg-slate-900/60 flex items-center justify-end">

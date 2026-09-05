@@ -121,16 +121,22 @@ export async function renderCaptionedVideo(
       const origHeight = video.videoHeight || 1920;
       const isPortrait = origHeight > origWidth;
 
+      // MOBILE 4GB RAM PROTECTION:
+      // On mobile browsers, cap resolution strictly to 720p maximum to prevent
+      // browser tab OOM crashes and "1 Download Failed" MediaRecorder errors.
+      const isMobileDevice = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+      const activeResolution = isMobileDevice && resolution !== '720p' ? '720p' : resolution;
+
       let targetWidth = 1080;
       let targetHeight = 1920;
 
-      if (resolution === '720p') {
+      if (activeResolution === '720p') {
         targetWidth = isPortrait ? 720 : 1280;
         targetHeight = isPortrait ? 1280 : 720;
-      } else if (resolution === '1080p') {
+      } else if (activeResolution === '1080p') {
         targetWidth = isPortrait ? 1080 : 1920;
         targetHeight = isPortrait ? 1920 : 1080;
-      } else if (resolution === '4k') {
+      } else if (activeResolution === '4k') {
         targetWidth = isPortrait ? 2160 : 3840;
         targetHeight = isPortrait ? 3840 : 2160;
       }
@@ -202,7 +208,7 @@ export async function renderCaptionedVideo(
       try {
         recorder = new MediaRecorder(stream, {
           mimeType: selectedMimeType || undefined,
-          videoBitsPerSecond: resolution === '4k' ? 7000000 : resolution === '1080p' ? 3500000 : 2000000,
+          videoBitsPerSecond: isMobileDevice ? 2000000 : activeResolution === '4k' ? 7000000 : activeResolution === '1080p' ? 3500000 : 2000000,
         });
       } catch (recInitErr) {
         console.warn('Initial MediaRecorder config failed, using basic fallback recorder:', recInitErr);
